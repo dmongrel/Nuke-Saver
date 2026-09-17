@@ -2,6 +2,7 @@
 
 #include <windowsx.h>
 
+#include "app/capture.h"
 #include "app/input_watcher.h"
 #include "app/log.h"
 #include "app/settings.h"
@@ -232,6 +233,13 @@ int RunFullScreen(HINSTANCE instance) {
     QueryPerformanceCounter(&start);
     prev = start;
 
+    // A capture run advances the clock by a fixed step instead of by the wall clock, so "frame
+    // 1700" names one moment in the cycle rather than one moment on this machine at this frame
+    // rate. Without it a capture is a lottery: the same request lands at a different second on a
+    // faster GPU, and two shots meant to be compared are of two different scenes.
+    const double fixedStep = CaptureRequestFromEnvironment().enabled ? 1.0 / 60.0 : 0.0;
+    if (fixedStep > 0.0) Log("capture run: fixed %.4fs per frame", fixedStep);
+
     unsigned long long frame = 0;
     MSG                msg{};
     while (host.running) {
@@ -247,12 +255,16 @@ int RunFullScreen(HINSTANCE instance) {
 
         LARGE_INTEGER now{};
         QueryPerformanceCounter(&now);
-        const double elapsed =
+        double elapsed =
             static_cast<double>(now.QuadPart - start.QuadPart) / static_cast<double>(freq.QuadPart);
         double delta =
             static_cast<double>(now.QuadPart - prev.QuadPart) / static_cast<double>(freq.QuadPart);
         prev = now;
         if (delta > kMaxFrameDelta) delta = kMaxFrameDelta;  // spec 4.2
+        if (fixedStep > 0.0) {
+            elapsed = static_cast<double>(frame) * fixedStep;
+            delta   = fixedStep;
+        }
         host.elapsed = elapsed;
 
         if (host.input.Consider(elapsed, SampleNow())) {

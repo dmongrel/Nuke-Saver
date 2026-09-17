@@ -71,6 +71,27 @@ void BuildUnitCube(std::vector<BoxVertex>* vertices, std::vector<uint32_t>* indi
     AddFace(vertices, indices, mY, spanX, spanZ, cornerMM);
 }
 
+void PackBoard(const world::Board& board, std::vector<BoardInstance>* out) {
+    out->clear();
+    out->reserve(board.boxes.size());
+
+    for (const world::BoardBox& b : board.boxes) {
+        BoardInstance inst{};
+
+        inst.baseYaw[0] = b.center.x;
+        inst.baseYaw[1] = b.base;
+        inst.baseYaw[2] = b.center.y;
+        inst.baseYaw[3] = b.yaw;
+
+        inst.sizeId[0] = b.halfExtent.x;
+        inst.sizeId[1] = b.height;
+        inst.sizeId[2] = b.halfExtent.y;
+        inst.sizeId[3] = static_cast<float>(b.segmentId);
+
+        out->push_back(inst);
+    }
+}
+
 void PackBuildings(const world::City& city, std::vector<BuildingInstance>* out) {
     out->clear();
     out->reserve(city.buildings.size());

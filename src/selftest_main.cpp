@@ -176,6 +176,8 @@ void TestHorizon();
 void TestCity();
 void TestUnitCube();
 void TestFraming();
+void TestTimeline();
+void TestBoard();
 }  // namespace selftest
 
 int main() {
@@ -193,6 +195,8 @@ int main() {
     selftest::TestCity();
     selftest::TestUnitCube();
     selftest::TestFraming();
+    selftest::TestTimeline();
+    selftest::TestBoard();
     TestArgs();
     TestInputWatcher();
     TestSettings();

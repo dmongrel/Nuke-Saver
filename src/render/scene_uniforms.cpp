@@ -40,4 +40,24 @@ void FillSceneUniforms(SceneUniforms* out, const world::Sky& sky, const core::Ma
     Store4(out->ambientColor, sky.ambientColor, sky.windowEmission);
 }
 
+void SetSceneTiming(SceneUniforms* out, float growthTime, float boardRise) {
+    out->timing[0] = growthTime;
+    out->timing[1] = boardRise;
+    out->timing[2] = 0.0f;
+    out->timing[3] = 0.0f;
+}
+
+void SetBoardLight(SceneUniforms* out, const core::Vec3& position, float intensity, float radius) {
+    out->boardLight[0] = position.x;
+    out->boardLight[1] = position.y;
+    out->boardLight[2] = position.z;
+    out->boardLight[3] = intensity;
+
+    // Amber, per spec 7.6. Held in linear scene-referred terms like every other colour here.
+    out->boardColor[0] = 1.0f;
+    out->boardColor[1] = 0.55f;
+    out->boardColor[2] = 0.16f;
+    out->boardColor[3] = radius;
+}
+
 }  // namespace render

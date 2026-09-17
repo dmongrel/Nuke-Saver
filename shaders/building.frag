@@ -110,6 +110,18 @@ void main() {
     shaded += albedo * skyAmbient * scene.groundColor.w * skyFacing;
     shaded += albedo * scene.groundColor.rgb * scene.groundColor.w * (1.0 - skyFacing) * 0.35;
 
+
+    // The board as a light source (spec 7.6). A point light at the glyph band, amber, falling off
+    // over its own radius — the rooftops beneath it must be visibly lit by it at night, and it
+    // must not be absent at noon.
+    vec3  toBoard   = scene.boardLight.xyz - vWorldPos;
+    float boardDist = length(toBoard);
+    float falloff   = scene.boardLight.w /
+                      (1.0 + (boardDist * boardDist) /
+                                 max(scene.boardColor.w * scene.boardColor.w, 1.0));
+    shaded += albedo * scene.boardColor.rgb *
+              max(dot(normal, toBoard / max(boardDist, 1e-3)), 0.0) * falloff;
+
     // Emission. A window's lamp does not get brighter after dark — what changes is everything
     // around it — so the radiance here is held constant in *display* terms by dividing out the
     // base exposure of the time of day (scene.horizonColor.w). Scaling it by the ambient instead

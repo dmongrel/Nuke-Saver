@@ -18,7 +18,10 @@ layout(set = 0, binding = 0, std140) uniform Scene {
     vec4 horizonColor;  // rgb, w = base exposure
     vec4 groundColor;   // rgb, w = ambient scale
     vec4 bodyColor;     // rgb emissive
-    vec4 ambientColor;  // rgb, w = window emission multiplier
+    vec4 ambientColor;
+    vec4 timing;      // x seconds into growth, y board rise
+    vec4 boardLight;  // xyz position, w intensity
+    vec4 boardColor;  // rgb amber, w falloff radius  // rgb, w = window emission multiplier
 } scene;
 
 // Reconstructs the world-space view ray for a pixel from its NDC position. Uses the far plane

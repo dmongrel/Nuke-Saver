@@ -107,7 +107,8 @@ World Generate(const app::Settings& settings, uint64_t seed) {
     World world;
     uint64_t pinned = 0;
     world.seed      = seed ? seed : (SeedFromEnvironment(&pinned) ? pinned : SeedFromClock());
-    world.cycleSeconds = kNominalCycleSeconds;
+    world.timeline     = Timeline::Create(world.seed);
+    world.cycleSeconds = world.timeline.total();
 
     // Extent 1.2 to 2 km across (spec 6.4), so a radius of 600 to 1000 m.
     world.cityRadius = core::Rng(world.seed).Fork(0xC17E).Range(600.0f, 1000.0f);
@@ -135,6 +136,8 @@ World Generate(const app::Settings& settings, uint64_t seed) {
         world.city       = GenerateCity(params);
         world.cityRadius = world.city.params.radius;
     }
+
+    world.board = GenerateBoard(world.seed, world.city);
 
     world.terrain.seed       = world.seed;
     world.terrain.cityRadius = world.cityRadius;
@@ -181,6 +184,15 @@ World Generate(const app::Settings& settings, uint64_t seed) {
              world.horizon.minHeight, world.horizon.maxHeight, worst / core::kDegToRad);
 
     return world;
+}
+
+float World::BoardRise(float t) const {
+    const float start = timeline.Start(Phase::Growth) + board.riseStart;
+    if (board.riseDuration <= 0.0f) return t >= start ? 1.0f : 0.0f;
+
+    // The same ease-out the buildings use (spec 6.5): monotonic, reaches exactly one, no bounce.
+    const float u = core::Saturate((t - start) / board.riseDuration);
+    return core::EaseOutCubic(u);
 }
 
 }  // namespace world

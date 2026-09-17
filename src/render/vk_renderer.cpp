@@ -35,6 +35,16 @@ using vk::kFramesInFlight;
 using vk::RenderPasses;
 using vk::WindowTarget;
 
+// The board's per-frame state (spec 7.6). A push constant rather than a uniform because it is two
+// words that change every frame, and because pushing it with the draw is what makes "all four
+// faces update in the same frame" true by construction.
+struct BoardPush {
+    uint32_t litLow  = 0;
+    uint32_t litHigh = 0;
+    float    rise    = 0.0f;
+    float    emissive = 0.0f;
+};
+
 struct TonemapPush {
     float exposure;
     float ditherAmp;
@@ -74,7 +84,7 @@ struct PipelineDesc {
     // Which vertex input the pipeline expects. Fullscreen passes build their own vertices from
     // gl_VertexIndex and want none; the ground reads world::Vertex; the city reads one unit cube
     // plus a per-instance stream.
-    enum class Vertices { None, World, Building };
+    enum class Vertices { None, World, Building, Board };
     Vertices         vertices     = Vertices::None;
     bool             backfaceCull = false;
 };
@@ -126,6 +136,20 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
         {6, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BuildingInstance, windowColor)},
     };
 
+    // Matches render::BoardInstance. Same cube, a smaller instance.
+    const VkVertexInputBindingDescription boardBindings[] = {
+        {0, sizeof(BoxVertex), VK_VERTEX_INPUT_RATE_VERTEX},
+        {1, sizeof(BoardInstance), VK_VERTEX_INPUT_RATE_INSTANCE},
+    };
+
+    const VkVertexInputAttributeDescription boardAttributes[] = {
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(BoxVertex, position)},
+        {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(BoxVertex, normal)},
+        {2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(BoxVertex, uv)},
+        {3, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BoardInstance, baseYaw)},
+        {4, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BoardInstance, sizeId)},
+    };
+
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     if (desc.vertices == PipelineDesc::Vertices::World) {
@@ -138,6 +162,11 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
         vertexInput.pVertexBindingDescriptions      = buildingBindings;
         vertexInput.vertexAttributeDescriptionCount = 7;
         vertexInput.pVertexAttributeDescriptions    = buildingAttributes;
+    } else if (desc.vertices == PipelineDesc::Vertices::Board) {
+        vertexInput.vertexBindingDescriptionCount   = 2;
+        vertexInput.pVertexBindingDescriptions      = boardBindings;
+        vertexInput.vertexAttributeDescriptionCount = 5;
+        vertexInput.pVertexAttributeDescriptions    = boardAttributes;
     }
 
     VkPipelineInputAssemblyStateCreateInfo assembly{};
@@ -235,7 +264,10 @@ public:
         vk::DestroyBuffer(*ctx_, &boxVertices_);
         vk::DestroyBuffer(*ctx_, &boxIndices_);
         vk::DestroyBuffer(*ctx_, &buildingInstances_);
+        vk::DestroyBuffer(*ctx_, &boardInstances_);
 
+        if (boardPipeline_) vkDestroyPipeline(dev, boardPipeline_, nullptr);
+        if (boardPipelineLayout_) vkDestroyPipelineLayout(dev, boardPipelineLayout_, nullptr);
         if (buildingPipeline_) vkDestroyPipeline(dev, buildingPipeline_, nullptr);
         if (groundPipeline_) vkDestroyPipeline(dev, groundPipeline_, nullptr);
         if (skyPipeline_) vkDestroyPipeline(dev, skyPipeline_, nullptr);
@@ -255,6 +287,7 @@ public:
         if (!vk::CreateRenderPasses(*ctx_, &passes_)) return false;
         if (!CreateDescriptorPool()) return false;
         if (!CreateSceneLayout()) return false;
+        if (!CreateBoardLayout()) return false;
         if (!CreateTonemapLayout()) return false;
 
         VkDevice dev = ctx_->device();
@@ -279,6 +312,12 @@ public:
             dev, {"building.vert", "building.frag", passes_.hdr, scenePipelineLayout_, true, true,
                   PipelineDesc::Vertices::Building, true});
         if (!buildingPipeline_) return false;
+
+        // The board. Its own layout, because it is the only scene pipeline with push constants.
+        boardPipeline_ = CreateGraphicsPipeline(
+            dev, {"board.vert", "board.frag", passes_.hdr, boardPipelineLayout_, true, true,
+                  PipelineDesc::Vertices::Board, true});
+        if (!boardPipeline_) return false;
 
         tonemapPipeline_ = CreateGraphicsPipeline(
             dev, {"fullscreen.vert", "tonemap.frag", passes_.present, tonemapPipelineLayout_, false,
@@ -347,6 +386,7 @@ public:
             WindowTarget::Frame frame = w.target->Begin(*ctx_, passes_);
             if (!frame.valid) continue;
 
+            frameTime_ = t;
             UpdateSceneUniforms(w, frame.frameSlot, t);
             RefreshTonemapBinding(w);
 
@@ -354,7 +394,14 @@ public:
             RecordTonemap(frame, w);
 
             const bool capturing = capture_.enabled && frameCounter_ == capture_.atFrame;
-            if (capturing) RecordCaptureCopy(frame, w);
+            if (capturing) {
+                app::Log("capture: frame %d t=%.3fs phase=%d rise=%.2f boardSeconds=%d mask=%llx",
+                         frameCounter_, t, static_cast<int>(world_.timeline.Primary(t)),
+                         world_.BoardRise(t), world_.timeline.BoardSeconds(t),
+                         static_cast<unsigned long long>(
+                             world::BoardMask(world_.timeline.BoardSeconds(t))));
+                RecordCaptureCopy(frame, w);
+            }
 
             if (!w.target->EndAndPresent(*ctx_, frame)) return;  // device lost
             if (capturing) FinishCapture(w);
@@ -535,7 +582,38 @@ private:
         SceneUniforms uniforms{};
         FillSceneUniforms(&uniforms, world_.sky, cam.View(), proj, cam.eye, t);
 
+        const float rise = world_.BoardRise(t);
+        SetSceneTiming(&uniforms, world_.GrowthTime(t), rise);
+
+        // The board lights the city only once it is lit (spec 7.6). Intensity is scaled by how far
+        // it has risen as well, so the light does not arrive before the object casting it.
+        const bool lit = world_.timeline.BoardSeconds(t) >= 0;
+
+        // The falloff radius is the glyph height, not the board's width. Sized by the width it
+        // reaches past the city and pools on open desert, which reads as a second sunset rather
+        // than as a sign lighting the roofs under it.
+        SetBoardLight(&uniforms,
+                      core::Vec3{0.0f, (world_.board.bandBottom + world_.board.bandTop) * 0.5f,
+                                 0.0f},
+                      lit ? rise * 2.0f : 0.0f, world_.board.glyphHeight * 1.5f);
+
         std::memcpy(w.sceneUbo[slot].mapped, &uniforms, sizeof(uniforms));
+    }
+
+    bool CreateBoardLayout() {
+        VkPushConstantRange push{};
+        push.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        push.size       = sizeof(BoardPush);
+
+        VkPipelineLayoutCreateInfo pli{};
+        pli.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pli.setLayoutCount         = 1;
+        pli.pSetLayouts            = &sceneSetLayout_;
+        pli.pushConstantRangeCount = 1;
+        pli.pPushConstantRanges    = &push;
+
+        return vkCreatePipelineLayout(ctx_->device(), &pli, nullptr, &boardPipelineLayout_) ==
+               VK_SUCCESS;
     }
 
     void SetViewport(VkCommandBuffer cmd, VkExtent2D extent) {
@@ -591,7 +669,32 @@ private:
             vkCmdDrawIndexed(frame.cmd, boxIndexCount_, buildingCount_, 0, 0, 0);
         }
 
-        // M3c draws the countdown board here.
+        if (boardBoxCount_ && world_.BoardRise(frameTime_) > 0.0f) {
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, boardPipeline_);
+            vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    boardPipelineLayout_, 0, 1, &w.sceneSet[frame.frameSlot], 0,
+                                    nullptr);
+
+            const uint64_t mask = world::BoardMask(world_.timeline.BoardSeconds(frameTime_));
+
+            BoardPush push;
+            push.litLow  = static_cast<uint32_t>(mask & 0xFFFFFFFFull);
+            push.litHigh = static_cast<uint32_t>(mask >> 32);
+            push.rise    = world_.BoardRise(frameTime_);
+            // Spec 5.1 puts a lit segment at 30 to 60 linear. The shader divides by the base
+            // exposure, so this is the figure the viewer sees rather than the one the scene holds.
+            push.emissive = 42.0f;
+
+            vkCmdPushConstants(frame.cmd, boardPipelineLayout_,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                               sizeof(push), &push);
+
+            const VkBuffer     buffers[2] = {boxVertices_.handle, boardInstances_.handle};
+            const VkDeviceSize offsets[2] = {0, 0};
+            vkCmdBindVertexBuffers(frame.cmd, 0, 2, buffers, offsets);
+            vkCmdBindIndexBuffer(frame.cmd, boxIndices_.handle, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(frame.cmd, boxIndexCount_, boardBoxCount_, 0, 0, 0);
+        }
 
         vkCmdEndRenderPass(frame.cmd);
     }
@@ -675,6 +778,19 @@ private:
 
         boxIndexCount_ = static_cast<uint32_t>(boxIdx.size());
         buildingCount_ = static_cast<uint32_t>(instances.size());
+
+        std::vector<BoardInstance> board;
+        PackBoard(world_.board, &board);
+        if (!board.empty()) {
+            if (!vk::CreateBufferWithData(*ctx_, board.data(),
+                                          board.size() * sizeof(BoardInstance),
+                                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &boardInstances_)) {
+                app::Log("vulkan: board upload failed");
+                return false;
+            }
+            boardBoxCount_ = static_cast<uint32_t>(board.size());
+        }
+
         return true;
     }
 
@@ -773,6 +889,8 @@ private:
     VkPipeline            skyPipeline_         = VK_NULL_HANDLE;
     VkPipeline            groundPipeline_      = VK_NULL_HANDLE;
     VkPipeline            buildingPipeline_    = VK_NULL_HANDLE;
+    VkPipelineLayout      boardPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline            boardPipeline_       = VK_NULL_HANDLE;
 
     Buffer   terrainVertices_{}, terrainIndices_{};
     Buffer   horizonVertices_{}, horizonIndices_{};
@@ -783,6 +901,14 @@ private:
     Buffer   boxVertices_{}, boxIndices_{}, buildingInstances_{};
     uint32_t boxIndexCount_ = 0;
     uint32_t buildingCount_ = 0;
+
+    Buffer   boardInstances_{};
+    uint32_t boardBoxCount_ = 0;
+
+    // The cycle time the frame being recorded belongs to. Stored rather than threaded through
+    // RecordScene, so the board's digits and the scene uniforms cannot disagree about what time
+    // it is — which for a countdown is the whole point.
+    float frameTime_ = 0.0f;
 
     VkSampler             sampler_               = VK_NULL_HANDLE;
     VkDescriptorSetLayout tonemapSetLayout_      = VK_NULL_HANDLE;

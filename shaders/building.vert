@@ -28,9 +28,10 @@ void main() {
     float start    = inExtentGrowth.z;
     float duration = max(inExtentGrowth.w, 1e-3);
 
-    // scene.cameraPos.w is seconds since the cycle began. Until M5 owns the phase clock the
-    // growth phase is taken to start at zero.
-    float progress = (scene.cameraPos.w - start) / duration;
+    // scene.timing.x is seconds into the growth phase, which the timeline of spec 4 places
+    // wherever it likes in the cycle. Negative before the phase begins, which is what keeps the
+    // desert empty through phase 0.
+    float progress = (scene.timing.x - start) / duration;
 
     // Spec 6.5: ease out, and MUST NOT overshoot or bounce. A cubic ease-out is monotonic and
     // reaches exactly 1, which a spring or a back-ease would not.

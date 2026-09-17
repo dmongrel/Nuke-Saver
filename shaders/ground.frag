@@ -75,6 +75,18 @@ void main() {
     float skyFacing = 0.5 + 0.5 * normal.y;
     lit += albedo * skyAmbient * scene.groundColor.w * skyFacing;
 
+
+    // The board as a light source (spec 7.6). A point light at the glyph band, amber, falling off
+    // over its own radius — the rooftops beneath it must be visibly lit by it at night, and it
+    // must not be absent at noon.
+    vec3  toBoard   = scene.boardLight.xyz - vWorldPos;
+    float boardDist = length(toBoard);
+    float falloff   = scene.boardLight.w /
+                      (1.0 + (boardDist * boardDist) /
+                                 max(scene.boardColor.w * scene.boardColor.w, 1.0));
+    lit += albedo * scene.boardColor.rgb *
+              max(dot(normal, toBoard / max(boardDist, 1e-3)), 0.0) * falloff;
+
     // Haze, into exactly the sky that is behind this surface (spec 6.3). Using the view ray's own
     // gradient value rather than a single fog colour is what lets the range dissolve into the sky
     // instead of into a grey band that does not match it.

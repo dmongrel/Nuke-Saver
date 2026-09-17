@@ -27,14 +27,28 @@ struct SceneUniforms {
     float groundColor[4]{};   // rgb linear, w = ambient scale
     float bodyColor[4]{};     // rgb linear emissive, far above 1 so it blooms (spec 5.1)
     float ambientColor[4]{};  // rgb linear, w = window emission multiplier
+
+    // Phase timing (spec 4). Kept here rather than derived in each shader from the cycle time,
+    // because the phase boundaries are drawn per cycle and the GPU has no way to know them.
+    float timing[4]{};  // x = seconds into the growth phase, y = board rise, zw reserved
+
+    // The countdown board as a light source (spec 7.6). It MUST illuminate the rooftops beneath
+    // it — plainly at night, subtly at noon, never absent — so it is a real light in the scene
+    // uniform rather than an emissive surface that happens to be bright.
+    float boardLight[4]{};  // xyz world position of the glyph band, w = intensity
+    float boardColor[4]{};  // rgb linear amber, w = falloff radius in metres
 };
 
-static_assert(sizeof(SceneUniforms) == 2 * 64 + 8 * 16, "SceneUniforms must stay std140-tight");
+static_assert(sizeof(SceneUniforms) == 2 * 64 + 11 * 16, "SceneUniforms must stay std140-tight");
 
 // Fills everything the sky and lighting need. The camera matrices are supplied separately
 // because the framing depends on the window's aspect ratio, which is per monitor.
 void FillSceneUniforms(SceneUniforms* out, const world::Sky& sky, const core::Mat4& view,
                        const core::Mat4& proj, const core::Vec3& cameraPos, float elapsed);
+
+// The two fields that change within a cycle rather than with the camera.
+void SetSceneTiming(SceneUniforms* out, float growthTime, float boardRise);
+void SetBoardLight(SceneUniforms* out, const core::Vec3& position, float intensity, float radius);
 
 }  // namespace render
 

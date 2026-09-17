@@ -10,10 +10,12 @@
 #ifndef NUKE_SAVER_WORLD_WORLD_H
 #define NUKE_SAVER_WORLD_WORLD_H
 
+#include "world/board.h"
 #include "world/camera.h"
 #include "world/city.h"
 #include "world/horizon.h"
 #include "world/mesh.h"
+#include "world/phase.h"
 #include "world/sky.h"
 #include "world/terrain.h"
 
@@ -25,9 +27,8 @@ struct Settings;
 
 namespace world {
 
-// Nominal cycle length. Spec 4 puts the full eleven-phase run at 80 to 115 seconds; the phase
-// state machine that fixes the exact figure per cycle arrives with M5, and until then this is
-// what the camera paces itself against.
+// Nominal cycle length, used only where a length is needed before the timeline exists. The real
+// figure is drawn per cycle by Timeline::Create and lands in World::cycleSeconds.
 constexpr float kNominalCycleSeconds = 100.0f;
 
 struct World {
@@ -52,10 +53,23 @@ struct World {
     Mesh terrainMesh;
     Mesh horizonMesh;
 
-    // Instances, not geometry: every building is the same unit cube (spec 6.4).
-    City city;
+    // Instances, not geometry: every building is the same unit cube (spec 6.4), and so is every
+    // piece of the countdown board (spec 7.6).
+    City  city;
+    Board board;
+
+    // The run cycle of spec 4. Drawn once, then a pure function of elapsed seconds.
+    Timeline timeline;
 
     CameraState CameraAt(float t) const { return camera.Evaluate(t); }
+
+    // Seconds into the growth phase at cycle time `t`. Negative before it starts, which is what
+    // keeps phase 0's desert empty without the shader knowing anything about phases.
+    float GrowthTime(float t) const { return t - timeline.Start(Phase::Growth); }
+
+    // How far the board has risen at `t`, 0 to 1, eased. It goes up last (spec 6.5), after the
+    // final building, so the eye is left on it going into phase 2.
+    float BoardRise(float t) const;
 };
 
 // Generates a world. `seed` of 0 means draw one from the clock, so two consecutive cycles never

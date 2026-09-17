@@ -159,7 +159,8 @@ install: $(TARGET)
 	test -n "$$local" || { echo "could not find Local AppData in the registry" >&2; exit 1; }; \
 	dir=$$(cygpath -u "$$local")/Nuke-Saver; \
 	mkdir -p "$$dir"; \
-	cp $(TARGET) "$$dir/$(TARGET)"; \
+	cp $(TARGET) "$$dir/$(TARGET)" || { \
+		echo "could not write $$dir/$(TARGET); it is probably running" >&2; exit 1; }; \
 	win="$$(cygpath -w "$$dir")\\$(TARGET)"; \
 	reg.exe add "$(DESKTOPKEY)" //v SCRNSAVE.EXE //t REG_SZ //d "$$win" //f > /dev/null; \
 	reg.exe add "$(DESKTOPKEY)" //v ScreenSaveActive //t REG_SZ //d 1 //f > /dev/null; \

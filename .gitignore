@@ -1,52 +1,19 @@
-# Build output
-build/
-cmake-build-*/
-out/
-bin/
-lib/
-
-# CMake
-CMakeCache.txt
-CMakeFiles/
-CMakeScripts/
-cmake_install.cmake
-CTestTestfile.cmake
-install_manifest.txt
-Testing/
-_deps/
-compile_commands.json
-CMakeUserPresets.json
-
-# Compiled objects / binaries
+# Build artifacts
+*.scr
+*.exe
 *.o
 *.obj
-*.a
-*.lib
-*.so
-*.so.*
-*.dylib
-*.dll
-*.exe
-*.pdb
-*.ilk
-*.exp
-*.gch
-*.pch
+*.res
+build/
 
-# MSVC
+# IDE files
 .vs/
-*.vcxproj.user
-
-# JetBrains CLion
 .idea/
-*.iml
-cmake-build-debug/
-cmake-build-release/
+*.suo
+*.user
 
-# VS Code
-.vscode/
-
-# OS
+# Windows
 Thumbs.db
-desktop.ini
-.DS_Store
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/

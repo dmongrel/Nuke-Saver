@@ -1,0 +1,8 @@
+#include <windows.h>
+
+STRINGTABLE
+BEGIN
+    1 "Nuke Saver"
+END
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "nuke-saver.manifest"

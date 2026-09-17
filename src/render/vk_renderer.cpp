@@ -1816,9 +1816,10 @@ private:
         push.cloud[0] = det.stemHeight;
         push.cloud[1] = det.capRadius;
         push.cloud[2] = det.missileLength;
-        // How far out the depth buckets reach. Sized to the orbit rather than to the far plane:
-        // past this everything lands in bucket 0, and everything that far away is haze anyway.
-        push.cloud[3] = world_.cityRadius * 8.0f;
+        // When the cloud starts letting go, which is when the embers stop burning and settle.
+        // The sort range used to live here; it is the city radius times a constant, so the shader
+        // works it out from timing.w rather than spending a second push slot on it.
+        push.cloud[3] = tl.Start(world::Phase::Disperse);
         return push;
     }
 

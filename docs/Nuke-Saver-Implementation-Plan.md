@@ -193,9 +193,10 @@ The milestone that decides whether the project works. Nothing here is cosmetic.
 - Scatter forces: radial impulse, gravity, drag, tumble (spec 7.4).
 - Ground collision and settling.
 - Gather: target assignment on the analytic mushroom shape, spring-damper convergence, curl
-  swirl, cap roll (spec 7.5).
+  swirl, and the cap's poloidal roll — driven in the integrator as well as turned in the target,
+  and gated to the tube so it does not fall on fragments still in flight (spec 7.5).
 - Disperse: staggered bottom-up release from the mushroom targets back into the scatter force
-  model, cap fan-out, settling (spec 7.7).
+  model, cap fan-out, settling, and the embers going grey and falling with it (spec 7.7).
 - Performance work against the real 125,000 count on the reference machine, at native
   resolution, before anything else is layered on top.
 

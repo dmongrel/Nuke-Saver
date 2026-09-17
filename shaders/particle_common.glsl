@@ -54,7 +54,7 @@ layout(push_constant) uniform ParticlePush {
     vec4  mDir;    // xyz missile direction of travel, w missile phase end
     vec4  blast;   // xyz impact point, w the shell's final reach in metres
     vec4  phases;  // x blast start, y blast duration, z gather start, w disperse end
-    vec4  cloud;   // x stem height, y cap radius, z missile length, w sort range in metres
+    vec4  cloud;   // x stem height, y cap radius, z missile length, w disperse start
 } pp;
 
 uint SystemCapacity(uint s) {
@@ -155,12 +155,16 @@ float DragTravel(float v0, float k, float age) {
     return v0 * (1.0 - exp(-k * age)) / max(k, 1e-3);
 }
 
+// How far out the depth buckets reach, in city radii. Sized to the orbit rather than to the far
+// plane: past this everything lands in bucket 0, and everything that far away is haze anyway.
+const float kSortRangeInRadii = 8.0;
+
 // Which depth bucket a particle falls in, 0 farthest. Square-rooted so the near half of the view
 // gets most of the buckets, which is where two overlapping particles are large enough on screen
 // for the wrong order to be visible at all.
 uint ParticleBucket(vec3 pos, vec3 camera) {
     float d = distance(pos, camera);
-    float u = clamp(sqrt(d / max(pp.cloud.w, 1.0)), 0.0, 1.0);
+    float u = clamp(sqrt(d / max(pp.timing.w * kSortRangeInRadii, 1.0)), 0.0, 1.0);
     return uint(clamp((1.0 - u) * float(kSortBuckets - 1u), 0.0, float(kSortBuckets - 1u)));
 }
 
@@ -352,8 +356,9 @@ bool ParticleAt(uint index, float t, out Particle p) {
     }
 
     // --- 4: embers (phases 8-9) ------------------------------------------------------------------
-    // Hot points carried up the stem while the cloud is gathering. Additive, tiny and flickering:
-    // they are the one thing in the back half of the cycle that is still emitting.
+    // Hot points carried up the stem while the cloud is gathering, and grey ash shed by it once
+    // the cloud lets go. Additive, tiny and flickering while they are still burning: they are the
+    // one thing in the back half of the cycle that is still emitting.
     life     = 5.0;
     float t0 = pp.phases.z;
     float t1 = pp.phases.w;
@@ -362,19 +367,70 @@ bool ParticleAt(uint index, float t, out Particle p) {
     uint  seed = j * 3559u + gen * 21851u;
     float u    = age / life;
     float a    = PHash(seed, 1u) * 6.2831853;
-    float r    = pp.cloud.y * (0.10 + 0.42 * PHash(seed, 2u));
-    float rise = 26.0 + PHash(seed, 3u) * 70.0;
-    float y0   = PHash(seed, 4u) * pp.cloud.x * 0.45;
     p.rnd      = PHash(seed, 6u);
 
-    float spread = 0.35 + 0.65 * u;
-    p.pos = vec3(pp.blast.x + cos(a) * r * spread, y0 + rise * age,
+    // Nothing is set alight after the cloud lets go. A slot that comes round after that is ash
+    // from the first frame, and it is shed from the body of the cloud rather than lit at the
+    // stem's foot: a grey point appearing at ground level has nowhere to fall from. That is what
+    // keeps the fall going for the whole phase -- an ember lives five seconds, so the cinders
+    // that were already climbing are grey and gone inside the first few.
+    bool late = (t - age) >= pp.cloud.w;
+
+    // Only a third of the slots are spent on it. A cinder is a point and can be packed; a smudge
+    // of ash is thirty times the area, and the same count of them stacked up the stem composites
+    // into a solid white column -- a stack of sprites is the colour of one of them whatever each
+    // one's alpha says, so density has to come off the count and not off the blend.
+    if (late && PHash(seed, 8u) > 0.34) return false;
+
+    float rise = late ? 0.0 : 26.0 + PHash(seed, 3u) * 70.0;
+    float r    = pp.cloud.y * (late ? 0.15 + 0.80 * sqrt(PHash(seed, 2u))
+                                    : 0.10 + 0.42 * PHash(seed, 2u));
+    float y0   = late ? pp.cloud.x * (0.35 + 0.95 * PHash(seed, 4u))
+                      : pp.cloud.x * 0.45 * PHash(seed, 4u);
+
+    // They stop burning and drop when the cloud does, staggered by how high the ember was
+    // headed so the column goes over from the bottom rather than switching in one frame. The
+    // stagger is drawn from the ember's own constants rather than from where it happens to be:
+    // a turning point that moved as the ember climbed would not be a turning point at all. And
+    // it is spent over about two seconds rather than over the phase, because an ember only lives
+    // five: a turn it does not reach before it dies is a turn nobody sees.
+    float reach = clamp((y0 + rise * life * 0.5) / max(pp.cloud.x, 1.0), 0.0, 1.0);
+    float turn  = late ? t - age
+                       : pp.cloud.w + 0.2 + 1.7 * (0.55 * reach + 0.45 * p.rnd);
+
+    // Clipped to the ember's own age, so the arithmetic below still means something for one born
+    // close to the turn.
+    float fall  = clamp(t - turn, 0.0, age);
+    float climb = age - fall;
+
+    // Frozen at the height it had reached, then let go. The drag is written out in closed form
+    // rather than integrated, because a particle here has no state to integrate: the climb bleeds
+    // away over half a second and what is left is a steady settle. Fast, for the same reason the
+    // stagger is short -- what is left of a five second life is all the falling there is.
+    const float kAshDrag = 1.9;   // how fast the rise is given up, per second
+    const float kAshFall = 42.0;  // metres a second it settles at once the rise is gone
+    float drop = fall > 0.0 ? (rise + kAshFall) * (1.0 - exp(-kAshDrag * fall)) / kAshDrag -
+                                  kAshFall * fall
+                            : 0.0;
+
+    float spread = late ? 1.0 : 0.35 + 0.65 * u;
+    p.pos = vec3(pp.blast.x + cos(a) * r * spread, max(y0 + rise * climb + drop, 2.0),
                  pp.blast.z + sin(a) * r * spread) +
-            vec3(wind.x, 0.0, wind.y) * (age * 0.8);
-    p.size     = mix(3.4, 1.1, u) * (0.6 + 0.8 * p.rnd);
-    p.tint     = mix(vec3(16.0, 5.6, 1.0), vec3(3.4, 0.55, 0.06), u);
-    p.alpha    = (1.0 - u * u) * (0.55 + 0.45 * sin(t * 9.0 + p.rnd * 31.0));
-    p.additive = true;
+            vec3(wind.x, 0.0, wind.y) * (age * 0.8 + fall * 1.4);
+
+    // Grey and much bigger once it has turned: a cinder going out is a smudge of ash, not a
+    // smaller cinder, and a point that stayed a point would be lost against a cloud of near-black
+    // fragments. Pale rather than dark for the same reason -- the thing it has to read against is
+    // the darkest object in the frame. It leaves the additive draw with the flicker, since neither
+    // belongs to something that is no longer burning, and it leaves at its own moment rather than
+    // the population's: several hundred sprites changing blend mode on one frame is a pop.
+    float ash  = late ? 1.0 : smoothstep(0.0, 1.2, fall);
+    p.size     = mix(3.4, 1.1, u) * (0.6 + 0.8 * p.rnd) * (1.0 + 2.0 * ash);
+    p.tint     = mix(mix(vec3(16.0, 5.6, 1.0), vec3(3.4, 0.55, 0.06), u),
+                     vec3(0.20, 0.195, 0.20), ash);
+    p.alpha    = (1.0 - u * u) * smoothstep(0.0, 0.08, u) *
+                 mix(0.55 + 0.45 * sin(t * 9.0 + p.rnd * 31.0), 0.30, ash);
+    p.additive = !late && ash < 0.35 + 0.5 * p.rnd;
     return true;
 }
 #endif

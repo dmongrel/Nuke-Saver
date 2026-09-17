@@ -266,7 +266,6 @@ World Generate(const app::Settings& settings, uint64_t seed) {
     // the run alone, and so leaves the arrival where the framing above was solved for it.
     {
         const CameraState view = world.camera.Evaluate(world.timeline.Start(Phase::Missile));
-        const float ridge = SilhouetteElevation(peaks, view.eye, world.detonation.missileBearing);
 
         // The top of the frame, in the same terms: how far the camera is already looking up or
         // down, plus most of half its vertical field of view. Not all of it: an entry point on

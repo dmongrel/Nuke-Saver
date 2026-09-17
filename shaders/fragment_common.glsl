@@ -113,6 +113,28 @@ vec4 QuatIntegrate(vec4 q, vec3 omega, float dt) {
 }
 
 #ifndef FRAGMENT_NO_PUSH
+// How fast the cap's tube turns about its own axis, in radians a second: about a revolution
+// every twenty seconds, which reads across a gather phase without the doughnut looking spun.
+const float kCapRoll = 0.32;
+
+// The centre of the cap's tube at a fragment's place on the cloud, its radius in `.z`, and in `.w`
+// whether this fragment belongs to the cap at all. Shared with the gather integrator so that the
+// shape the spring aims at and the motion carrying fragments around it describe one vortex rather
+// than two that drift apart.
+vec4 MushroomRing(vec3 restPos, float grow) {
+    const float cityRadius = max(fp.release.w, 1.0);
+    float r0   = clamp(length(restPos.xz) / cityRadius, 0.0, 1.0);
+    float ring = mix(0.50, 1.0, clamp((r0 - 0.42) / 0.58, 0.0, 1.0));
+    return vec4(fp.cloud.z * grow * ring, fp.cloud.y * grow, fp.cloud.w * grow,
+                r0 < 0.42 ? 0.0 : 1.0);
+}
+
+// The rate this fragment's stretch of tube turns at. Nearly the same for all of them, because a
+// vortex ring rolls as a body; the spread only keeps the tube from reading as a rigid pipe.
+float MushroomRoll(uint index) {
+    return kCapRoll * (0.88 + 0.24 * FragHash(index, 67u));
+}
+
 // Where this fragment belongs on the mushroom (spec 7.5). Assignment is a pure function of the
 // fragment's rest position and index, so it is stable for the whole cycle: a fragment that starts
 // near the centre goes to the stem and one from the outskirts goes to the cap rim, every frame,
@@ -129,7 +151,6 @@ vec3 MushroomTarget(uint index, vec3 restPos, float grow) {
 
     float stemHeight = fp.cloud.x * grow;
     float capHeight  = fp.cloud.y * grow;
-    float capRadius  = fp.cloud.z * grow;
     float capTube    = fp.cloud.w * grow;
 
     // Spec 7.5: the surface has to churn, and the cloud must never look like a solid model. The
@@ -149,11 +170,15 @@ vec3 MushroomTarget(uint index, vec3 restPos, float grow) {
 
     // The cap: a torus, thicker under the rim than over it so the silhouette sits rather than
     // floats. The further out a fragment started, the further out on the ring it lands.
-    float ring  = mix(0.50, 1.0, (r0 - 0.42) / 0.58);
-    float major = capRadius * ring * (1.0 + 0.16 * wob);
+    float major = MushroomRing(restPos, grow).x * (1.0 + 0.16 * wob);
     float minor = capTube * (0.35 + 0.65 * sqrt(u)) * (1.0 + 0.28 * wob);
-    float phi   = v * 6.2831853;
 
+    // The cap is a vortex ring, not a static doughnut (7.5). `phi` is the angle around the tube --
+    // zero pointing outward, a quarter turn up, a half turn in toward the stem -- so running it
+    // backwards with the clock is what carries material up the inner face, out across the top and
+    // down the outer edge. That circulation is the shape of the thing rather than a decoration on
+    // it: it is why a mushroom cloud curls under at its rim instead of spreading like a disc.
+    float phi = v * 6.2831853 - t * MushroomRoll(index);
     return vec3(cos(a) * (major + cos(phi) * minor),
                 capHeight + sin(phi) * minor * 0.8 + capTube * 0.18 * wob,
                 sin(a) * (major + cos(phi) * minor));

@@ -146,16 +146,34 @@ void main() {
         vel += toTarget * (0.34 * dt);
         vel -= vel * (0.95 * dt);
 
-        // A slow swirl so the surface churns and the cloud never looks like a solid model, plus
-        // the cap rolling outward and over once it is there.
-        float ang   = atan(pos.z, pos.x);
-        vec3  tang  = vec3(-sin(ang), 0.0, cos(ang));
+        // A slow swirl about the stem, so the surface churns and the cloud never reads as a
+        // solid model.
+        float ang    = atan(pos.z, pos.x);
+        vec3  tang   = vec3(-sin(ang), 0.0, cos(ang));
         float radial = length(pos.xz);
 
         float churn = 2.4 + 3.0 * rnd;
         vel += tang * (churn * dt);
-        vel += vec3(cos(ang), 0.0, sin(ang)) * (sin(t * 0.7 + rnd * 6.28) * 2.2 * dt);
-        vel.y += cos(radial * 0.006 + t * 0.9 + rnd * 6.28) * 1.8 * dt;
+
+        // And the roll of the vortex ring, driven here rather than only aimed at. The target the
+        // spring pulls toward is already turning, but a spring follows a moving target at a lag
+        // and at a fraction of its swing, which comes out as a doughnut being tracked rather than
+        // one that turns. This carries a fragment's own velocity toward the velocity its place on
+        // the tube has: up the inner face, outward over the top, down the outer edge. The offset
+        // is clipped to the tube, and the grip fades out with distance from it, so that the roll
+        // is something the cap does rather than something done to every fragment on its way in:
+        // ungated, a fragment still out over the city sits a tube's width outside the ring and is
+        // dragged steadily downward by a term that was meant to describe the rim curling under.
+        // The stem is left out of it entirely, having no tube to roll around.
+        vec4  ringAt = MushroomRing(r.anchor.xyz, fp.release.z);
+        float tube   = max(ringAt.z, 1.0);
+        vec2  off    = vec2(radial - ringAt.x, pos.y - ringAt.y);
+        float grip   = ringAt.w * (1.0 - smoothstep(tube, tube * 2.5, length(off)));
+        off          = clamp(off, -tube, tube);
+
+        float roll    = MushroomRoll(i);
+        vec3  rolling = vec3(cos(ang) * off.y / 0.8, -off.x * 0.8, sin(ang) * off.y / 0.8) * roll;
+        vel += (rolling - vel) * (0.45 * grip * dt);
 
         // And the whole thing drifts in one constant wind (spec 7.5).
         pos += fp.wind.xyz * dt;

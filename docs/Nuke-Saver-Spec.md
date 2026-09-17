@@ -106,8 +106,8 @@ drawn per cycle, uniformly, from the stated range.
 | 5 | Flash | 0.3 s | On impact the screen goes fully white over ~120 ms and holds. |
 | 6 | Blast | 4–6 s *random*, overlaps 7 | A refractive spherical shell expands fast from the impact point. Every building it touches — and the board — bursts into triangles. |
 | 7 | Scatter | 5 s exactly | Triangles fly outward from the centre, tumbling, gravity dragging them down until they are skidding and settling on the desert floor. |
-| 8 | Gather | 25–35 s *random* | The pull reverses. Every triangle is drawn back toward the city centre and lifted, converging into a mushroom cloud built entirely out of the city that was there. The cap rolls over and the cloud turns. |
-| 9 | Disperse | 15–25 s *random* | The cloud lets go. Fragments are released from the shape and fall, thinning the cloud from the bottom up, raining back down over the ruins and settling. |
+| 8 | Gather | 25–35 s *random* | The pull reverses. Every triangle is drawn back toward the city centre and lifted, converging into a mushroom cloud built entirely out of the city that was there. The cap turns about its own tube, rising on the inside and curling down at the rim. |
+| 9 | Disperse | 15–25 s *random* | The cloud lets go. Fragments are released from the shape and fall, thinning the cloud from the bottom up, raining back down over the ruins and settling. The embers go out, turn grey and come down with it. |
 | 10 | Fade | 8 s | To black over the settled debris field. State torn down, new seed drawn, empty land again. |
 
 Phases 3 and 4 MUST NOT overlap: the countdown reaches zero, *then* the missile appears.
@@ -453,12 +453,25 @@ The pull reverses. This is what the scatter exists to set up.
 - Fragments move toward their target under a spring with damping, plus a slow curl-noise swirl so
   the surface churns and the cloud never looks like a solid model. They MUST NOT snap into place;
   convergence should take most of the phase.
-- Once converged the cloud MUST keep turning: the cap rolls outward and over, reading as a vortex
-  ring, and the whole thing drifts slowly in one constant wind direction.
+- Once converged the cloud MUST keep turning, and the turn that matters is **around the cap's own
+  tube**, not around the stem. The cap is a vortex ring: material climbs the inner face of the
+  doughnut, turns outward across the top, and rolls down the outer edge. That circulation is the
+  shape of the thing rather than a decoration on it — it is why a mushroom cloud curls under at
+  its rim instead of spreading like a disc — so a cap that only spun about the stem, or only
+  wobbled, would be wrong even if it never held still. A revolution SHOULD take around twenty
+  seconds, so the roll reads across a gather phase without the cloud looking spun.
+- The roll MUST be **driven as well as aimed at**. Turning the target shape alone is not enough: a
+  spring follows a moving target at a lag and at a fraction of its swing, which comes out as a
+  doughnut being tracked rather than one that turns. Fragments MUST also carry the velocity their
+  place on the tube has.
+- That drive MUST be confined to the cap, and MUST fade out with distance from the tube. A
+  fragment still crossing the desert on its way in sits a tube's width outside the ring; a roll
+  term applied to it is not a rim curling under but a steady downdraft on everything in flight.
+- The whole cloud drifts slowly in one constant wind direction.
 - Fragments retain their building colours throughout, so the cloud reads as the city it was made
   of. Fragments MAY be tinted toward the fireball's colour near the stem base, falling off with
   height.
-- Embers (5.1) rise through the stem.
+- Embers (5.1) rise through the stem, and go out with the cloud (7.7).
 
 This replaces revision 1's raymarched volumetric cloud entirely. There is no density field and
 no march.
@@ -556,8 +569,21 @@ The cloud does not hold. Having assembled itself, it comes apart.
 - Fragments settle on the ground on contact, under the same rule as 7.4.
 - By the end of the phase the cloud MUST be gone and the majority of fragments MUST be at rest,
   leaving a debris field over the scorched footprint for the phase 10 fade.
-- Embers continue to rise through the falling debris, giving the frame movement in both
-  directions at once.
+- **Embers go out and come down with the cloud.** They stop burning when it lets go, turn grey,
+  and fall through the debris rather than climbing past it. An ember still rising through a cloud
+  that is collapsing reads as a second event happening at the same time, not as part of this one.
+- Nothing new is set alight after the cloud lets go. The emitter does not stop, though: what it
+  makes from that point on is ash, shed — falling — from the body of the cloud. An ember only
+  lives about five seconds, so the cinders that were already climbing are grey and gone inside the
+  first few, and without the shedding the effect would be over before the phase was a quarter
+  through. Ash MUST come from the cloud and not from the ground: a grey point appearing at the
+  stem's foot has nowhere to fall from.
+- The turn MUST be staggered by how high the ember was headed, on the same bottom-up principle as
+  the fragments. It MUST also be spent in a couple of seconds rather than across the phase, for
+  the same reason — a turn an ember does not reach before it dies is a turn nobody sees.
+- Ash MUST be legible against the cloud, which by this point is the darkest thing in the frame.
+  That means pale rather than dark, and a visibly larger sprite than the cinder it came from: a
+  point of light that goes out and stays a point simply disappears.
 
 ## 8. Rendering
 
@@ -806,7 +832,9 @@ confirmation it took.
 | A14 | Time the countdown against a stopwatch | 5.00 s ±50 ms, digits step once per second, no drift |
 | A15 | Frame-step phase 6 | No building is fragmented before the shell reaches it |
 | A16 | Frame at end of phase 7 | Majority of fragments at rest on the ground, outside the city footprint |
-| A17 | Frame at mid-phase 8 | Recognisable mushroom, cap rolling, fragments still carrying building colours |
+| A17 | Frame at mid-phase 8 | Recognisable mushroom, fragments still carrying building colours |
+| A31 | Frame-step 10 s of phase 8 across the cap | Tube circulates about its own axis: material rising on the inner face, descending at the outer rim; roughly one revolution per 20 s |
+| A32 | Frame-step the first 5 s of phase 9 | Every ember turns grey and falls; none still climbing; no new hot embers after the phase starts |
 | A18 | Sample 50 building colours | Spread consistent with ±10% HSV variation; no two adjacent buildings identical |
 | A19 | Run each `TimeOfDay` setting | Sun angle, sun colour, sky and exposure all differ; windows brightest at night |
 | A20 | Board legibility, every shot type, 16:9 and 21:9 | All eight glyphs identifiable through phases 3–4 from every point on the orbit arc, partial occlusion permitted |

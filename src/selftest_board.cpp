@@ -292,11 +292,12 @@ void TestBoard() {
     // Six digits of seven bars and two colons of two: the colons leave five ids each unused.
     Check(used == 6 * kSegmentsPerGlyph + 2 * 2, "the used segment ids are the ones HH:MM:SS needs");
 
-    // It stands on the desert (spec 7.6), not on a mast over the city. The band starts just above
-    // the ground and finishes below the tallest roof, so the skyline reads over and around the
-    // numerals rather than the numerals reading over the skyline.
-    Check(board.bandBottom >= 0.0f && board.bandBottom < board.glyphHeight * 0.25f,
-          "the glyph band starts on the ground");
+    // It stands on the desert (spec 7.6), not on a mast over the city. The band is lifted clear of
+    // the sand by about three quarters of a glyph and finishes below the tallest roof, so the
+    // skyline still reads over and around the numerals rather than the other way about.
+    Check(board.bandBottom > board.glyphHeight * 0.5f &&
+              board.bandBottom < board.glyphHeight * 1.1f,
+          "the glyph band is lifted about three quarters of a glyph off the ground");
     Check(board.bandTop < city.tallest, "and finishes below the tallest roof");
 
     bool onTheGround = true;

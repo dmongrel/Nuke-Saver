@@ -244,10 +244,12 @@ Board GenerateBoard(uint64_t seed, const City& city, const core::Vec3& viewFrom,
     board.glyphHeight = faceWidth / widthInHeights;
     board.width       = faceWidth;
 
-    // On the ground. The digits stand on the desert with the city behind them, at about half the
-    // height of the tallest building, so the skyline reads over and around them instead of the
-    // board reading over the skyline.
-    board.bandBottom = board.glyphHeight * 0.10f;
+    // Lifted clear of the desert by three quarters of a glyph, rather than standing on it. The
+    // numerals still sit in the skyline at about half the height of the tallest building, so it
+    // reads over and around them rather than the other way about; what the lift buys is that the
+    // outermost blocks cross the band itself as the camera comes along the front of the city,
+    // instead of cutting off its feet.
+    board.bandBottom = board.glyphHeight * (0.10f + 0.75f);
     board.bandTop    = board.bandBottom + board.glyphHeight;
 
     board.faceColor = core::Albedo(core::palette::kBoardFrame, seed, 0, 0);

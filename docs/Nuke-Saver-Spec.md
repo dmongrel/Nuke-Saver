@@ -494,11 +494,13 @@ parallaxes them against the buildings. It also means partial occlusion is not a 
 
 **Form**
 
-- A freestanding structure standing **on the desert at the near edge of the city**, its one face
+- A freestanding structure **on the desert at the near edge of the city**, its one face
   carrying eight 7-segment glyphs reading `HH:MM:SS` — six digits and two colons, and nothing
   else. No name, no marking, no branding.
-- The glyph band MUST start at ground level. The numerals stand on the ground with the city
-  behind and beside them; they are not carried above the roofs on a mast.
+- The glyph band sits low, lifted clear of the desert by about three quarters of a glyph height.
+  Standing it on the sand put the numerals where the nearest blocks cut off their feet rather
+  than crossing them. It is a lift, not a mast: the numerals stay in the skyline with the city
+  behind and beside them, and are never carried above the roofs.
 - Position MUST be chosen against the camera: on the arc of the footprint **nearest** the camera
   during the countdown, and off to the camera's **right**. Placed on the far edge the whole city
   is in the way and most of the glyphs are lost; placed on the city axis nothing can ever occlude

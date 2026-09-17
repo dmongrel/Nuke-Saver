@@ -1,4 +1,5 @@
 #include <windows.h>
+#include "src/resource.h"
 
 STRINGTABLE
 BEGIN
@@ -6,3 +7,27 @@ BEGIN
 END
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "nuke-saver.manifest"
+
+IDD_CONFIG DIALOGEX 0, 0, 250, 132
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Nuke Saver Settings"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "Quality", -1, 12, 14, 70, 9
+    COMBOBOX        IDC_QUALITY, 90, 11, 148, 90,
+                    CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+
+    LTEXT           "Time of day", -1, 12, 38, 70, 9
+    COMBOBOX        IDC_TIMEOFDAY, 90, 35, 148, 100,
+                    CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+
+    LTEXT           "Camera", -1, 12, 62, 70, 9
+    COMBOBOX        IDC_CAMERA, 90, 59, 148, 100,
+                    CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+
+    LTEXT           "Automatic quality adjusts to hold the frame rate.",
+                    IDC_ABOUT_TEXT, 12, 86, 226, 18
+
+    DEFPUSHBUTTON   "OK", IDOK, 130, 110, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 188, 110, 50, 14
+END

@@ -30,9 +30,11 @@ export TMP    := $(abspath $(BUILDTMP))
 export TEMP   := $(TMP)
 export TMPDIR := $(TMP)
 
+# VK_USE_PLATFORM_WIN32_KHR exposes the Win32 surface entry points; without it volk declares
+# neither vkCreateWin32SurfaceKHR nor the presentation-support query.
 # VK_NO_PROTOTYPES is not optional: spec section 12 requires that nothing static-imports
 # vulkan-1.dll, so every entry point comes from volk at runtime.
-CPPFLAGS = -Isrc -Ithird_party/volk -Ithird_party/vma -DVK_NO_PROTOTYPES \
+CPPFLAGS = -Isrc -Ithird_party/volk -Ithird_party/vma -DVK_NO_PROTOTYPES -DVK_USE_PLATFORM_WIN32_KHR \
            -DUNICODE -D_UNICODE
 WARN     = -Wall -Wextra
 CXXFLAGS = -std=c++17 $(WARN) -O2 -municode
@@ -78,16 +80,18 @@ $(SHADER_C): $(SPVS) tools/embed_shaders.sh | $(GENDIR)
 	sh tools/embed_shaders.sh $@ $(SPVS)
 
 # ---- objects ---------------------------------------------------------------------------
+# Every object depends on the Makefile: a change to CPPFLAGS is a change to what the code
+# means, and a half-rebuilt tree links with the wrong entry points rather than failing loudly.
 
-$(OBJDIR)/%.o: %.cpp $(SHADER_C) | $(BUILDTMP)
+$(OBJDIR)/%.o: %.cpp $(SHADER_C) Makefile | $(BUILDTMP)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
 
-$(OBJDIR)/%.o: %.c | $(BUILDTMP)
+$(OBJDIR)/%.o: %.c Makefile | $(BUILDTMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/gen/%.o: $(GENDIR)/%.c | $(BUILDTMP)
+$(OBJDIR)/gen/%.o: $(GENDIR)/%.c Makefile | $(BUILDTMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 

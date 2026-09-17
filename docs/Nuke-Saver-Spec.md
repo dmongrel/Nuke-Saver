@@ -679,6 +679,20 @@ Neither of the first two is installed on the current machine; M0 in the plan han
 Vendored dependencies MUST live in `third_party/` and be checked in, so the build needs no
 network.
 
+### 13.2.1 Diagnostics
+
+Neither of these is required to build or run, and neither MUST ever be on in a shipped build.
+
+`NUKE_SAVER_LOG=1` writes a trace to `%TEMP%\nuke-saver.log`. A `-mwindows` binary has no
+console, so this is the only way to see what a run did.
+
+Vulkan validation is gated on that same variable, because a screen saver has no business loading
+a layer on a user's machine. MSYS2 ships the layer but does not register it with the loader, so
+it also needs `VK_LAYER_PATH=C:\msys64\ucrt64\bin` (package
+`mingw-w64-ucrt-x86_64-vulkan-validation-layers`, already installed). Without that variable the
+renderer silently runs unvalidated: the log line `vulkan: validation enabled` is the only
+confirmation it took.
+
 ### 13.3 Shaders
 
 - GLSL under `shaders/`, compiled to SPIR-V by `glslc` as a Makefile rule.

@@ -36,6 +36,11 @@ public:
     // cycle began and `delta` is the clamped frame delta (spec 4.2).
     virtual void RenderFrame(double elapsed, double delta) = 0;
 
+    // True when presenting already blocks until the display is ready, as a FIFO swapchain does.
+    // The host uses this to decide whether it must yield the CPU itself: sleeping on top of a
+    // vsync-paced present does not save power, it just misses vblanks.
+    virtual bool PacesItself() const { return false; }
+
     // Block until the GPU is finished with everything. Called once, before teardown (spec 9.2).
     virtual void WaitIdle() {}
 

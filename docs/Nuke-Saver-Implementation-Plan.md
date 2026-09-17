@@ -1,6 +1,6 @@
 # nuke-saver: Implementation Plan
 
-Status: draft, fourth revision
+Status: fourth revision; M0-M2 built
 Companion to [`Nuke-Saver-Spec.md`](Nuke-Saver-Spec.md), which owns behavior. This document
 owns sequencing, module layout and risk.
 
@@ -20,6 +20,40 @@ Revisions:
   milestone in the plan and carries a suggested split.
 - 2026-09-17: updated against spec revision 5. Preview is finished at M1 rather than revisited
   later: black is the specified behavior until M6 bakes the stills, so A7 moves to M1.
+
+---
+
+## 0. Progress
+
+| Milestone | State | Commit | Verified by |
+|---|---|---|---|
+| M0 Toolchain | done | `6a111e6` | A1 clean build, zero warnings; selftest probe reaches `complete` |
+| M1 Host and fallback | done | `7fef5a6` | 48 selftest checks; A8, A9, A12 direct; A2/A3/A4 deferred, see below |
+| M2 Vulkan core | done | this commit | Live run, validation clean over 600+ frames; A9 re-checked against a real device |
+| M3 World and growth | next | | |
+
+### Deferred verification
+
+These are not failures. They are checks that could not be run when the code was written, and
+each one names what would settle it.
+
+- **A2, A3, A4 (full-screen presentation and input exit).** The machine's own screen saver owned
+  the input desktop during M1 and M2, so any process spawned from the session sat on `Default`
+  and got `ERROR_ACCESS_DENIED` from `GetCursorPos`, read nothing from `GetAsyncKeyState`, and
+  had no foreground window. The exit policy was made testable without the OS instead:
+  `InputWatcher::Consider` is pure, and the grace period, dead zone and key-edge cases are
+  covered by selftest. Re-run the live checks from an interactive session.
+- **A11 soak.** Run at M2 only as a 600-frame check with validation on, not the full duration.
+  The plan already schedules it properly at M4 and M6, which is where a GPU leak would show.
+
+### Open question raised during M1
+
+`/config`, and any bare word beginning with `c`, `p` or `s`, selects a mode: the argument parser
+strips an optional prefix and switches on the first character, which is what ghost-saver does and
+what the spec makes authoritative. It is flagged rather than changed, and pinned by a selftest
+check so the behavior cannot drift silently. Windows itself only ever passes `/s`, `/p <hwnd>` and
+`/c[:hwnd]`, so nothing is broken; the question is whether matching ghost-saver is worth the
+surprise.
 
 ---
 

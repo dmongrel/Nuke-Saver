@@ -266,9 +266,12 @@ int RunFullScreen(HINSTANCE instance) {
 
         if (host.renderer) host.renderer->RenderFrame(elapsed, delta);
 
-        // Spec 11.2 forbids busy-waiting to pace frames. Until M2 brings a swapchain whose
-        // present blocks, yield explicitly so an idle fallback does not spin a core.
-        Sleep(8);
+        // Spec 11.2 forbids busy-waiting to pace frames. A FIFO swapchain already blocks in
+        // present, and sleeping on top of it costs vblanks rather than power: Windows' default
+        // timer granularity is 15.6 ms, so a Sleep(8) here pinned the loop to 64 fps on a
+        // 3440x1440 display that was perfectly capable of more. Only an unpaced backend needs
+        // the explicit yield.
+        if (!host.renderer || !host.renderer->PacesItself()) Sleep(8);
     }
 
     Log("loop exited after %llu frames", frame);

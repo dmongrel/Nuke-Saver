@@ -56,6 +56,10 @@ public:
         VkFramebuffer   hdrFbo      = VK_NULL_HANDLE;
         VkFramebuffer   presentFbo  = VK_NULL_HANDLE;
         uint32_t        imageIndex  = 0;
+        // Which frame-in-flight slot this is. The renderer needs it to pick the matching copy of
+        // any per-frame resource it owns - uniform buffers above all - because writing the copy
+        // the GPU is still reading is the classic way to get a frame of stale camera.
+        uint32_t        frameSlot   = 0;
         bool            valid       = false;
     };
 
@@ -67,6 +71,12 @@ public:
     bool EndAndPresent(Context& ctx, const Frame& frame);
 
     VkExtent2D extent() const { return extent_; }
+
+    // The swapchain image behind an acquired frame. Only the capture path wants this: reading
+    // back what was actually presented is the one check that cannot be faked by re-rendering.
+    VkImage swapchainImage(uint32_t index) const {
+        return index < images_.size() ? images_[index] : VK_NULL_HANDLE;
+    }
 
 private:
     WindowTarget() = default;

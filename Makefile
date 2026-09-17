@@ -55,6 +55,9 @@ APP_CXX_SRCS  := $(filter-out $(SELFTEST_SRCS),$(ALL_CXX_SRCS))
 C_SRCS       := third_party/volk/volk.c
 
 SHADER_SRCS  := $(sort $(wildcard shaders/*.vert shaders/*.frag shaders/*.comp))
+# Shared GLSL pulled in by #include. Not compiled on its own, but every stage depends on it:
+# editing scene.glsl without rebuilding the shaders that read it is a mismatch nothing reports.
+SHADER_INCS  := $(sort $(wildcard shaders/*.glsl))
 SPVS         := $(patsubst shaders/%,$(SPVDIR)/%.spv,$(SHADER_SRCS))
 SHADER_C     := $(GENDIR)/shaders_generated.c
 
@@ -74,8 +77,8 @@ all: $(TARGET)
 # A shader that fails to compile fails the build (spec 13.3). -Werror makes that true for
 # warnings too, so a pipeline never ships with a diagnostic nobody read.
 
-$(SPVDIR)/%.spv: shaders/% | $(SPVDIR)
-	$(GLSLC) -Werror -O -o $@ $<
+$(SPVDIR)/%.spv: shaders/% $(SHADER_INCS) | $(SPVDIR)
+	$(GLSLC) -Werror -O -Ishaders -o $@ $<
 
 # One generated TU holding every blob plus the lookup table.
 $(SHADER_C): $(SPVS) tools/embed_shaders.sh | $(GENDIR)

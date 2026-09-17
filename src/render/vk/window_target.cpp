@@ -463,6 +463,7 @@ WindowTarget::Frame WindowTarget::Begin(Context& ctx, const RenderPasses& passes
     frame.hdrFbo     = hdrFbo_;
     frame.presentFbo = presentFbos_[imageIndex];
     frame.imageIndex = imageIndex;
+    frame.frameSlot  = slot;
     frame.valid      = true;
     return frame;
 }

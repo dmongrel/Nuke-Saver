@@ -169,6 +169,8 @@ void TestMath();
 void TestRng();
 void TestNoise();
 void TestColor();
+void TestSky();
+void TestCamera();
 }  // namespace selftest
 
 int main() {
@@ -179,6 +181,8 @@ int main() {
     selftest::TestRng();
     selftest::TestNoise();
     selftest::TestColor();
+    selftest::TestSky();
+    selftest::TestCamera();
     TestArgs();
     TestInputWatcher();
     TestSettings();

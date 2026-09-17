@@ -45,10 +45,12 @@ LDLIBS   = -lgdi32 -lshell32 -ladvapi32
 
 # ---- sources ---------------------------------------------------------------------------
 
-# Every .cpp under src/ belongs to the screensaver except the console selftest harness.
+# Every .cpp under src/ belongs to the screensaver except the console selftest harness, which
+# is any src/selftest_*.cpp. Matching on the prefix rather than naming files means a new suite
+# is picked up by both targets without touching this.
 ALL_CXX_SRCS := $(shell find src -name '*.cpp' | sort)
-SELFTEST_SRC := src/selftest_main.cpp
-APP_CXX_SRCS := $(filter-out $(SELFTEST_SRC),$(ALL_CXX_SRCS))
+SELFTEST_SRCS := $(filter src/selftest_%,$(ALL_CXX_SRCS))
+APP_CXX_SRCS  := $(filter-out $(SELFTEST_SRCS),$(ALL_CXX_SRCS))
 
 C_SRCS       := third_party/volk/volk.c
 
@@ -59,7 +61,7 @@ SHADER_C     := $(GENDIR)/shaders_generated.c
 APP_OBJS     := $(APP_CXX_SRCS:%.cpp=$(OBJDIR)/%.o) \
                 $(C_SRCS:%.c=$(OBJDIR)/%.o) \
                 $(SHADER_C:$(GENDIR)/%.c=$(OBJDIR)/gen/%.o)
-SELFTEST_OBJS := $(filter-out $(OBJDIR)/src/main.o,$(APP_OBJS)) $(OBJDIR)/src/selftest_main.o
+SELFTEST_OBJS := $(filter-out $(OBJDIR)/src/main.o,$(APP_OBJS))                  $(SELFTEST_SRCS:%.cpp=$(OBJDIR)/%.o)
 
 SELFTEST_EXE := $(BUILD)/nuke-saver-selftest.exe
 

@@ -12,6 +12,7 @@
 #include "app/input_watcher.h"
 #include "app/settings.h"
 #include "render/vk_probe.h"
+#include "selftest_check.h"
 
 #include <cstdio>
 #include <cwchar>
@@ -19,16 +20,7 @@
 
 namespace {
 
-int g_failures = 0;
-int g_checks   = 0;
-
-void Check(bool condition, const char* what) {
-    ++g_checks;
-    if (!condition) {
-        ++g_failures;
-        std::printf("  FAIL  %s\n", what);
-    }
-}
+using selftest::Check;
 
 app::Args ParseLine(std::initializer_list<const wchar_t*> tail) {
     std::vector<const wchar_t*> argv{L"nuke-saver.scr"};
@@ -171,17 +163,29 @@ void TestProbe() {
 
 }  // namespace
 
+// Suites living in their own translation units.
+namespace selftest {
+void TestMath();
+void TestRng();
+void TestNoise();
+void TestColor();
+}  // namespace selftest
+
 int main() {
     std::printf("nuke-saver selftest\n");
     std::printf("-------------------\n");
 
+    selftest::TestMath();
+    selftest::TestRng();
+    selftest::TestNoise();
+    selftest::TestColor();
     TestArgs();
     TestInputWatcher();
     TestSettings();
     TestProbe();
 
     std::printf("-------------------\n");
-    std::printf("%d checks, %d failure(s): %s\n", g_checks, g_failures,
-                g_failures == 0 ? "PASS" : "FAIL");
-    return g_failures == 0 ? 0 : 1;
+    std::printf("%d checks, %d failure(s): %s\n", selftest::Checks(),
+                selftest::Failures(), selftest::Failures() == 0 ? "PASS" : "FAIL");
+    return selftest::Failures() == 0 ? 0 : 1;
 }

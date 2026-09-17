@@ -6,12 +6,30 @@
 // says sRGB encoding happens once and nowhere else, and the swapchain is a UNORM format
 // precisely so that this shader owns the transfer function rather than the hardware.
 
+// The tonemap's own set 0 is the HDR image and the exposure buffer, so the scene block lands in
+// set 1 here. The blast refraction below needs the camera and the shell, which is why this pass
+// sees the scene at all.
+#define SCENE_SET 1
+
+#include "exposure.glsl"
+#include "scene.glsl"
+
 layout(set = 0, binding = 0) uniform sampler2D uHdr;
+layout(set = 0, binding = 2) uniform sampler2D uBloom;
 
 layout(push_constant) uniform Push {
-    float exposure;    // linear multiplier applied before the curve
+    float exposure;    // the base exposure of the time of day; the adaptation's reference
     float ditherAmp;   // in output LSBs; 1.0 is the usual choice for 8-bit
     float nightShift;  // 0 by day, 1 when the moon is the key light
+    float delta;
+    float width;
+    float height;
+    float minExposure;
+    float maxExposure;
+    float bloom;  // how much of the chain is added back (spec 8.1)
+    float pad0;
+    float pad1;
+    float pad2;
 } pc;
 
 layout(location = 0) in  vec2 vUV;
@@ -59,8 +77,67 @@ vec3 Scotopic(vec3 color, float amount) {
     return mix(color, vec3(lum) * vec3(0.72, 0.90, 1.34), rods);
 }
 
+// The blast shell (spec 7.2): a refractive boundary that offsets the screen-space position of
+// everything behind it, strongest at the shell surface and falling off sharply on both sides.
+//
+// Done here rather than as a pass of its own because this is the one place in the frame that
+// already has the finished HDR image as a texture and is writing somewhere else. A separate pass
+// would need a second full-size HDR image to read from, to the tune of 20 MB a monitor, to arrive
+// at the same sample.
+vec2 BlastRefraction(vec2 uv) {
+    float radius = scene.blast.w;
+    if (radius <= 0.0) return uv;
+
+    vec3 origin    = scene.cameraPos.xyz;
+    vec3 direction = ViewRay(uv * 2.0 - 1.0);
+
+    vec3  toCentre = scene.blast.xyz - origin;
+    float along    = dot(toCentre, direction);
+    if (along <= 0.0) return uv;  // the shell is behind the camera
+
+    // The impact parameter: how close this pixel's ray passes to the centre. A ray that grazes the
+    // shell has one close to the radius, and that is exactly the set of pixels the boundary is.
+    float impact = sqrt(max(dot(toCentre, toCentre) - along * along, 0.0));
+
+    // Sharp on both sides, as spec 7.2 requires: this has to read as a moving boundary, not as a
+    // general blur over the middle of the frame.
+    float width = max(radius * 0.05, 4.0);
+    float edge  = (impact - radius) / width;
+    float band  = exp(-edge * edge);
+    if (band < 0.002) return uv;
+
+    // Outward from the shell's own centre on screen. A fixed direction would shear the image; this
+    // is the direction the surface normal actually projects to.
+    vec4 clip = scene.viewProj * vec4(scene.blast.xyz, 1.0);
+    if (clip.w <= 0.0) return uv;
+    vec2 centre = (clip.xy / clip.w) * 0.5 + 0.5;
+
+    vec2 outward = uv - centre;
+    float len    = length(outward);
+    if (len < 1e-5) return uv;
+
+    // The offset shrinks as the shell grows. A front a kilometre across bends the same amount of
+    // light as one a hundred metres across did, spread over ten times the screen.
+    float strength = 0.035 * band * clamp(220.0 / max(radius, 1.0), 0.18, 1.0);
+
+    return uv + (outward / len) * strength;
+}
+
 void main() {
-    vec3 hdr = texture(uHdr, vUV).rgb * pc.exposure;
+    // The adapted exposure of spec 8.2, not the authored one. The authored value is still here —
+    // it is what the adaptation is anchored to and what it falls back on before the first frame
+    // has been measured — but what multiplies the frame is what the histogram said.
+    float exposure = ex.initialised > 0.5 ? ex.exposure : pc.exposure;
+
+    vec2 uv  = BlastRefraction(vUV);
+    vec3 hdr = texture(uHdr, uv).rgb;
+
+    // Bloom (spec 8.1), added before the exposure rather than after it. It has to go through the
+    // same adaptation as everything else: a glow that survives the flash unchanged would be the
+    // one thing on screen the white-out did not reach.
+    hdr += texture(uBloom, uv).rgb * pc.bloom;
+
+    hdr *= exposure;
     vec3 sdr = LinearToSrgb(ACESFilm(Scotopic(hdr, pc.nightShift)));
 
     // Dither in display space, centred on zero, scaled to the output quantum.

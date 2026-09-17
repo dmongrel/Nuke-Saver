@@ -7,7 +7,13 @@
 #ifndef NUKE_SAVER_SCENE_GLSL
 #define NUKE_SAVER_SCENE_GLSL
 
-layout(set = 0, binding = 0, std140) uniform Scene {
+// Which descriptor set the block is bound in. Set 0 for every scene pass; the tonemap spends set 0
+// on its own image and exposure buffer and takes the scene as set 1, so it defines this first.
+#ifndef SCENE_SET
+#define SCENE_SET 0
+#endif
+
+layout(set = SCENE_SET, binding = 0, std140) uniform Scene {
     mat4 viewProj;
     mat4 invViewProj;
 
@@ -18,10 +24,13 @@ layout(set = 0, binding = 0, std140) uniform Scene {
     vec4 horizonColor;  // rgb, w = base exposure
     vec4 groundColor;   // rgb, w = ambient scale
     vec4 bodyColor;     // rgb emissive
-    vec4 ambientColor;
-    vec4 timing;      // x seconds into growth, y board rise
-    vec4 boardLight;  // xyz position, w intensity
-    vec4 boardColor;  // rgb amber, w falloff radius  // rgb, w = window emission multiplier
+    vec4 ambientColor;  // rgb, w = window emission multiplier
+    vec4 timing;        // x seconds into growth, y board rise
+    vec4 boardLight;    // xyz position, w intensity
+    vec4 boardColor;    // rgb amber, w falloff radius
+    vec4 blast;         // xyz impact point, w shell radius
+    vec4 fireLight;     // xyz fireball centre, w radius in metres (0 = no fireball)
+    vec4 fireColor;     // rgb linear emissive magnitude, w flash intensity
 } scene;
 
 // Reconstructs the world-space view ray for a pixel from its NDC position. Uses the far plane

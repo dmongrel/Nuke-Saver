@@ -37,9 +37,20 @@ struct SceneUniforms {
     // uniform rather than an emissive surface that happens to be bright.
     float boardLight[4]{};  // xyz world position of the glyph band, w = intensity
     float boardColor[4]{};  // rgb linear amber, w = falloff radius in metres
+
+    // The blast shell (spec 7.2). Here rather than only in the compute push block because the
+    // building and board vertex shaders need it too: a box the shell has reached MUST stop being
+    // drawn on the frame its fragments start, or the city is both standing and in pieces.
+    float blast[4]{};  // xyz impact point, w shell radius in metres
+
+    // The fireball as a light (spec 8.2): from phase 5 it MUST be the dominant source in the
+    // scene. Every surface pass reads these, so it is one point light in the scene block rather
+    // than a parameter threaded through four pipelines.
+    float fireLight[4]{};  // xyz world centre, w radius in metres; w = 0 means there is no fire
+    float fireColor[4]{};  // rgb linear emissive magnitude, w = flash intensity (spec 7.2)
 };
 
-static_assert(sizeof(SceneUniforms) == 2 * 64 + 11 * 16, "SceneUniforms must stay std140-tight");
+static_assert(sizeof(SceneUniforms) == 2 * 64 + 14 * 16, "SceneUniforms must stay std140-tight");
 
 // Fills everything the sky and lighting need. The camera matrices are supplied separately
 // because the framing depends on the window's aspect ratio, which is per monitor.
@@ -49,6 +60,9 @@ void FillSceneUniforms(SceneUniforms* out, const world::Sky& sky, const core::Ma
 // The two fields that change within a cycle rather than with the camera.
 void SetSceneTiming(SceneUniforms* out, float growthTime, float boardRise);
 void SetBoardLight(SceneUniforms* out, const core::Vec3& position, float intensity, float radius);
+void SetBlast(SceneUniforms* out, const core::Vec3& center, float radius);
+void SetFire(SceneUniforms* out, const core::Vec3& center, float radius, const core::Vec3& color,
+             float flash);
 
 }  // namespace render
 

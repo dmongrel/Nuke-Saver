@@ -60,4 +60,24 @@ void SetBoardLight(SceneUniforms* out, const core::Vec3& position, float intensi
     out->boardColor[3] = radius;
 }
 
+void SetBlast(SceneUniforms* out, const core::Vec3& center, float radius) {
+    out->blast[0] = center.x;
+    out->blast[1] = center.y;
+    out->blast[2] = center.z;
+    out->blast[3] = radius;
+}
+
+void SetFire(SceneUniforms* out, const core::Vec3& center, float radius, const core::Vec3& color,
+             float flash) {
+    out->fireLight[0] = center.x;
+    out->fireLight[1] = center.y;
+    out->fireLight[2] = center.z;
+    out->fireLight[3] = radius;
+
+    out->fireColor[0] = color.x;
+    out->fireColor[1] = color.y;
+    out->fireColor[2] = color.z;
+    out->fireColor[3] = flash;
+}
+
 }  // namespace render

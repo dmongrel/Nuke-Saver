@@ -1,0 +1,44 @@
+#version 450
+
+// Auto-exposure, pass one (spec 8.2): the luminance histogram of the frame just rendered.
+//
+// Bins are accumulated in shared memory first and merged into the buffer once per workgroup. The
+// naive version — one global atomic per pixel — puts five million atomics a frame on the same 256
+// addresses, and on a frame where most of the screen is one brightness they all land on one of
+// them.
+
+#include "exposure.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uHdr;
+
+layout(push_constant) uniform Push {
+    float exposure;
+    float ditherAmp;
+    float nightShift;
+    float delta;
+    float width;
+    float height;
+    float minExposure;
+    float maxExposure;
+} pc;
+
+shared uint sBins[kBins];
+
+void main() {
+    uint local = gl_LocalInvocationIndex;
+    if (local < uint(kBins)) sBins[local] = 0u;
+    barrier();
+
+    // Every second texel each way. A quarter of the pixels is far more than enough to place the
+    // average of a 5 megapixel frame, and it is four times cheaper.
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy) * 2;
+    if (coord.x < int(pc.width) && coord.y < int(pc.height)) {
+        vec3 hdr = texelFetch(uHdr, coord, 0).rgb;
+        atomicAdd(sBins[LogLumToBin(Luminance(hdr))], 1u);
+    }
+
+    barrier();
+    if (local < uint(kBins) && sBins[local] != 0u) atomicAdd(ex.bins[local], sBins[local]);
+}

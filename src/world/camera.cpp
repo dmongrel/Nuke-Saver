@@ -47,10 +47,17 @@ OrbitCamera OrbitCamera::Create(uint64_t seed, ShotType shot, float cityRadius,
     // Radii are multiples of the city radius, so a small city does not get a distant camera.
     // Heights are absolute metres where the shot is defined by height: street level is street
     // level whatever the city measures.
+    //
+    // Every shot ends further out than it starts. The cycle's subject grows from an empty desert
+    // to a mushroom cloud, and spec 11.1 makes that cloud the binding constraint on a radius that
+    // cannot cut or zoom — so a shot that closes in over the cycle has to be solved from a start
+    // far enough out to hold the cloud at the end, which leaves the city a speck while it is being
+    // built. Backing off instead lets the solver put the opening where the city is worth looking
+    // at, and reads as the camera giving ground to the thing getting bigger.
     switch (shot) {
         case ShotType::DistantRidge:
-            cam.radiusStart_       = cityRadius * rng.Range(3.4f, 4.2f);
-            cam.radiusEnd_         = cam.radiusStart_ * rng.Range(0.82f, 0.94f);
+            cam.radiusStart_       = cityRadius * rng.Range(2.4f, 3.0f);
+            cam.radiusEnd_         = cam.radiusStart_ * rng.Range(1.30f, 1.50f);
             cam.heightStart_       = cityRadius * rng.Range(0.85f, 1.15f);
             cam.heightEnd_         = cam.heightStart_ * rng.Range(0.70f, 0.85f);
             cam.targetHeightStart_ = cityRadius * 0.16f;
@@ -60,8 +67,8 @@ OrbitCamera OrbitCamera::Create(uint64_t seed, ShotType shot, float cityRadius,
             break;
 
         case ShotType::LowApproach:
-            cam.radiusStart_       = cityRadius * rng.Range(2.6f, 3.2f);
-            cam.radiusEnd_         = cam.radiusStart_ * rng.Range(0.70f, 0.82f);
+            cam.radiusStart_       = cityRadius * rng.Range(1.7f, 2.1f);
+            cam.radiusEnd_         = cam.radiusStart_ * rng.Range(1.55f, 1.85f);
             cam.heightStart_       = rng.Range(18.0f, 40.0f);
             cam.heightEnd_         = rng.Range(90.0f, 160.0f);
             cam.targetHeightStart_ = cityRadius * 0.22f;
@@ -71,8 +78,8 @@ OrbitCamera OrbitCamera::Create(uint64_t seed, ShotType shot, float cityRadius,
             break;
 
         case ShotType::HighOblique:
-            cam.radiusStart_       = cityRadius * rng.Range(2.0f, 2.6f);
-            cam.radiusEnd_         = cam.radiusStart_ * rng.Range(1.05f, 1.25f);
+            cam.radiusStart_       = cityRadius * rng.Range(1.5f, 1.9f);
+            cam.radiusEnd_         = cam.radiusStart_ * rng.Range(1.40f, 1.70f);
             cam.heightStart_       = cityRadius * rng.Range(1.9f, 2.5f);
             cam.heightEnd_         = cityRadius * rng.Range(0.95f, 1.25f);
             cam.targetHeightStart_ = 0.0f;
@@ -83,7 +90,7 @@ OrbitCamera OrbitCamera::Create(uint64_t seed, ShotType shot, float cityRadius,
 
         case ShotType::StreetLevel:
             cam.radiusStart_       = cityRadius * rng.Range(1.15f, 1.45f);
-            cam.radiusEnd_         = cam.radiusStart_ * rng.Range(1.25f, 1.55f);
+            cam.radiusEnd_         = cam.radiusStart_ * rng.Range(1.90f, 2.40f);
             cam.heightStart_       = rng.Range(8.0f, 22.0f);
             cam.heightEnd_         = cityRadius * rng.Range(0.55f, 0.80f);
             cam.targetHeightStart_ = cityRadius * 0.10f;
@@ -145,7 +152,19 @@ float OrbitCamera::FramingFill(const Subject& subject, float t, float aspect) co
 }
 
 void OrbitCamera::FrameOn(const Subject& subject, float aspect, float holdFraction, float margin) {
-    if (subject.radius <= 0.0f) return;
+    FramingWindow window;
+    window.subject = subject;
+    window.from    = 0.0f;
+    window.to      = cycleSeconds_ * holdFraction;
+    FrameOn(&window, 1, aspect, margin);
+}
+
+void OrbitCamera::FrameOn(const FramingWindow* windows, int count, float aspect, float margin) {
+    if (count <= 0) return;
+
+    float widest = 0.0f;
+    for (int i = 0; i < count; ++i) widest = std::fmax(widest, windows[i].subject.radius);
+    if (widest <= 0.0f) return;
 
     const float limit = 1.0f - core::Clamp(margin, 0.0f, 0.6f);
 
@@ -170,14 +189,19 @@ void OrbitCamera::FrameOn(const Subject& subject, float aspect, float holdFracti
     const auto fits = [&](float k) {
         applyScale(k);
 
-        // The subject has to be framed through the opening stretch, and has to stay in front of
-        // the camera for the whole cycle — the orbit creeps inward, and a shot that frames the
-        // city at t=0 can still fly into it at t=0.8.
-        for (int i = 0; i <= 48; ++i) {
-            const float t    = cycleSeconds_ * static_cast<float>(i) / 48.0f;
-            const float fill = FramingFill(subject, t, aspect);
-            if (fill > 1e5f) return false;
-            if (t <= cycleSeconds_ * holdFraction && fill > limit) return false;
+        // Each subject has to be framed through its own window, and every one of them has to
+        // stay in front of the camera for the whole cycle — the orbit creeps inward, and a shot
+        // that frames the city at t=0 can still fly into it at t=0.8.
+        for (int w = 0; w < count; ++w) {
+            const FramingWindow& window = windows[w];
+            if (window.subject.radius <= 0.0f) continue;
+
+            for (int i = 0; i <= 64; ++i) {
+                const float t    = cycleSeconds_ * static_cast<float>(i) / 64.0f;
+                const float fill = FramingFill(window.subject, t, aspect);
+                if (fill > 1e5f) return false;
+                if (t >= window.from && t <= window.to && fill > limit) return false;
+            }
         }
         return true;
     };

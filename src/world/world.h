@@ -13,8 +13,10 @@
 #include "world/board.h"
 #include "world/camera.h"
 #include "world/city.h"
+#include "world/detonation.h"
 #include "world/horizon.h"
 #include "world/mesh.h"
+#include "world/missile.h"
 #include "world/phase.h"
 #include "world/sky.h"
 #include "world/terrain.h"
@@ -53,6 +55,10 @@ struct World {
     Mesh terrainMesh;
     Mesh horizonMesh;
 
+    // The missile of spec 7.1. A mesh rather than instances, and the only one that moves; where
+    // it is at a given moment comes from the detonation, not from here.
+    Mesh missileMesh;
+
     // Instances, not geometry: every building is the same unit cube (spec 6.4), and so is every
     // piece of the countdown board (spec 7.6).
     City  city;
@@ -60,6 +66,9 @@ struct World {
 
     // The run cycle of spec 4. Drawn once, then a pure function of elapsed seconds.
     Timeline timeline;
+
+    // The blast and the cloud it leaves (spec 7.2, 7.5), as dimensions rather than as geometry.
+    Detonation detonation;
 
     CameraState CameraAt(float t) const { return camera.Evaluate(t); }
 
@@ -70,6 +79,21 @@ struct World {
     // How far the board has risen at `t`, 0 to 1, eased. It goes up last (spec 6.5), after the
     // final building, so the eye is left on it going into phase 2.
     float BoardRise(float t) const;
+
+    // Forwarded so that nothing outside has to hold both the timeline and the detonation to ask
+    // the two questions every pass after phase 5 needs answered.
+    float ShellRadius(float t) const { return detonation.ShellRadius(timeline, t); }
+    float CloudGrow(float t) const { return detonation.CloudGrow(timeline, t); }
+    float FlashIntensity(float t) const { return detonation.FlashIntensity(timeline, t); }
+    float FireRadius(float t) const { return detonation.FireRadius(timeline, t); }
+    core::Vec3 FireCenter(float t) const { return detonation.FireCenter(timeline, t); }
+    core::Vec3 FireColor(float t) const { return detonation.FireColor(timeline, t); }
+
+    bool MissileVisible(float t) const { return detonation.MissileVisible(timeline, t); }
+    core::Mat4 MissileTransform(float t) const {
+        return world::MissileTransform(detonation.MissileAt(timeline, t),
+                                       detonation.MissileDirection());
+    }
 };
 
 // Generates a world. `seed` of 0 means draw one from the clock, so two consecutive cycles never

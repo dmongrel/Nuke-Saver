@@ -1,0 +1,170 @@
+#version 450
+
+// The fragment simulation: scatter, settle, gather, disperse (spec 7.3 to 7.7).
+//
+// One invocation per fragment per frame, reading and writing only its own record. No neighbour
+// queries, no sorting, no readback — which is why 150,000 independent rigid bodies cost one
+// dispatch rather than a physics engine.
+//
+// The integration is explicit and driven by the frame delta, which spec 4.2 allows: it exempts
+// per-frame jitter from delta timing and requires the delta to be clamped before it reaches the
+// simulation, which is the host's job and done there. What must stay reproducible from the seed is
+// the gross shape, and that comes from the hashes below, none of which depend on frame count.
+
+#define FRAGMENT_SET 0
+#include "fragment_common.glsl"
+
+layout(local_size_x = 64) in;
+
+// Ground level. The desert is not flat, but it is flat enough under the city that a plane is the
+// right collision model here — spec 7.4 asks for fragments that skid and stop, not for terrain
+// following, and a height sample per fragment per frame would cost more than the whole rest of
+// this shader.
+const float kGround = 0.0;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+
+    if (i >= fp.counts.y) return;
+
+    FragState s = state[i];
+    FragRest  r = rest[i];
+
+    const float t      = fp.timing.x;
+    const float dt     = fp.timing.y;
+    const float rnd    = s.spin.w;
+    const float gravity = fp.wind.w;
+
+    // --- fragmentation (spec 7.3) ---------------------------------------------------------------
+    // The shell reaches this fragment's building and the building ceases to be one, in this frame.
+    if (s.pos.w == kFragIntact) {
+        // Measured to the parent box's middle, exactly as building.vert measures it, so a
+        // building is never both standing and in pieces in the same frame.
+        ShatterBox parent = boxes[uint(r.anchor.w + 0.5)];
+        vec3  middle   = vec3(parent.centerYaw.x,
+                              parent.centerYaw.y + parent.extentQuads.z * 0.5,
+                              parent.centerYaw.z);
+        float distance = length(middle - fp.blast.xyz);
+        if (fp.blast.w <= 0.0 || distance > fp.blast.w) {
+            state[i].pos = vec4(r.anchor.xyz, kFragIntact);
+            return;
+        }
+
+        // Radial impulse, falling off with distance, ragged by a fifth either way (spec 7.4).
+        vec3 dir = normalize(r.anchor.xyz - fp.blast.xyz + vec3(0.0, 1.0, 0.0));
+
+        // The falloff is gentle on purpose. Sized to the city's radius rather than to a fraction
+        // of it, the outskirts still leave at half the speed of the centre — which is what spec
+        // 7.4 needs when it asks for the field to end up well outside the city's footprint.
+        float falloff = 1.0 / (1.0 + distance / max(fp.release.w * 1.2, 1.0));
+        float speed   = 175.0 * falloff * (0.8 + 0.4 * FragHash(i, 3u));
+
+        // Enough lift to open the field upward, and no more: spec 7.4 wants the frame at the end
+        // of the phase to read as flat debris under the fireball, and anything thrown higher than
+        // this is still in the air when the phase ends.
+        dir = normalize(dir + vec3(0.0, 0.20, 0.0));
+
+        vec3 spin = vec3(FragHash(i, 5u), FragHash(i, 7u), FragHash(i, 13u)) * 2.0 - 1.0;
+
+        s.pos  = vec4(r.anchor.xyz, kFragFlying);
+        s.vel  = vec4(dir * speed, 0.0);
+        s.spin = vec4(normalize(spin) * (2.0 + speed * 0.06), rnd);
+        s.quat = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    // --- the pull reverses (spec 7.5) -----------------------------------------------------------
+    const float gatherStart = fp.timing.z;
+
+    // The window matters as much as the condition. Without the upper bound this runs every frame
+    // for the rest of the cycle, and a fragment let go by the disperse below is hauled straight
+    // back onto the cloud on the next one — which looks exactly like a cloud that never disperses.
+    bool gathering = t >= gatherStart && (fp.release.x <= 0.0 || t < fp.release.x);
+
+    if (gathering && s.pos.w != kFragGather && fp.release.z > 0.0) {
+        // Released from rest, wherever it lies. Grounded fragments lift off under the spring
+        // rather than teleporting, which is the whole point of the phase reading as a gather.
+        s.pos.w = kFragGather;
+        s.vel.w = 0.0;
+    }
+
+    // --- disperse (spec 7.7) --------------------------------------------------------------------
+    // Bottom up: a fragment's release time comes from how high its place on the cloud is, so the
+    // stem empties first and the cap lets go from its underside outward.
+    if (s.pos.w == kFragGather && fp.release.x > 0.0 && t >= fp.release.x) {
+        vec3  target = MushroomTarget(i, r.anchor.xyz, 1.0);
+        float top    = max(fp.cloud.y + fp.cloud.w, 1.0);
+        float frac   = clamp(target.y / top, 0.0, 1.0);
+
+        // Releasing across the whole phase is not the same as the cloud being gone by the end of
+        // it, which is what spec 7.7 asks for. A cap fragment let go at the top of the cloud has
+        // six hundred metres to fall, so the last of them has to be let go with time left to land.
+        // Everything is released inside the first three fifths; the rest of the phase is the fall.
+        float span    = max(fp.release.y - fp.release.x, 0.001);
+        float release = fp.release.x + span * (0.04 + 0.45 * frac + 0.10 * FragHash(i, 29u));
+
+        if (t >= release) {
+            // A nudge inherited from the cap's roll, so cap fragments fan out as they fall.
+            vec3 outward = normalize(vec3(s.pos.x, 0.0, s.pos.z) + vec3(1e-4, 0.0, 0.0));
+            s.pos.w = kFragFlying;
+            s.vel   = vec4(s.vel.xyz * 0.35 + outward * (4.0 + 10.0 * frac), 0.0);
+            s.spin  = vec4(normalize(vec3(FragHash(i, 31u), FragHash(i, 41u), FragHash(i, 43u)) *
+                                     2.0 - 1.0) * 3.0,
+                           rnd);
+        }
+    }
+
+    // --- integrate ------------------------------------------------------------------------------
+    vec3 pos = s.pos.xyz;
+    vec3 vel = s.vel.xyz;
+
+    if (s.pos.w == kFragFlying) {
+        vel.y -= gravity * dt;
+        vel -= vel * 0.22 * dt;  // drag, light (spec 7.4)
+        pos += vel * dt;
+
+        if (pos.y <= kGround) {
+            // Kill the vertical, scrub most of the horizontal, damp the spin: they skid and stop.
+            pos.y = kGround;
+            vel.y = 0.0;
+            vel.xz *= 0.34;
+            s.spin.xyz *= 0.25;
+
+            if (dot(vel.xz, vel.xz) < 0.6) {
+                vel        = vec3(0.0);
+                s.spin.xyz = vec3(0.0);
+                s.pos.w    = kFragSettled;
+            }
+        }
+
+        s.quat = QuatIntegrate(s.quat, s.spin.xyz, dt);
+    } else if (s.pos.w == kFragGather) {
+        vec3 target = MushroomTarget(i, r.anchor.xyz, fp.release.z);
+
+        // Spring and damper. Stiff enough to converge over most of the phase, soft enough that
+        // nothing snaps: spec 7.5 asks for the arrival to take the phase, not a moment of it.
+        vec3 toTarget = target - pos;
+        vel += toTarget * (0.34 * dt);
+        vel -= vel * (0.95 * dt);
+
+        // A slow swirl so the surface churns and the cloud never looks like a solid model, plus
+        // the cap rolling outward and over once it is there.
+        float ang   = atan(pos.z, pos.x);
+        vec3  tang  = vec3(-sin(ang), 0.0, cos(ang));
+        float radial = length(pos.xz);
+
+        float churn = 2.4 + 3.0 * rnd;
+        vel += tang * (churn * dt);
+        vel += vec3(cos(ang), 0.0, sin(ang)) * (sin(t * 0.7 + rnd * 6.28) * 2.2 * dt);
+        vel.y += cos(radial * 0.006 + t * 0.9 + rnd * 6.28) * 1.8 * dt;
+
+        // And the whole thing drifts in one constant wind (spec 7.5).
+        pos += fp.wind.xyz * dt;
+
+        pos += vel * dt;
+        s.quat = QuatIntegrate(s.quat, s.spin.xyz + vec3(0.0, 0.6, 0.0), dt);
+    }
+
+    s.pos.xyz = pos;
+    s.vel.xyz = vel;
+    state[i]  = s;
+}

@@ -41,7 +41,13 @@ void main() {
     // A building MUST NOT be visible before its start time. Scaling to zero is not enough — that
     // leaves a flat quad lying on the ground, and five hundred of them make a visible sheet. So
     // the whole triangle is pushed outside the clip volume instead: z < 0 fails 0 <= z <= w.
-    if (progress <= 0.0) {
+    // Spec 7.3: when the shell reaches this building it is replaced by its fragments in the same
+    // frame. Measured to the box's middle, exactly as shaders/fragment_sim.comp measures it, so
+    // the two can never disagree about whether this thing is still standing.
+    vec3 middle = vec3(inCenterRotation.x, inCenterRotation.y * 0.5, inCenterRotation.z);
+    bool shattered = scene.blast.w > 0.0 && length(middle - scene.blast.xyz) <= scene.blast.w;
+
+    if (progress <= 0.0 || shattered) {
         gl_Position = vec4(0.0, 0.0, -1.0, 1.0);
         vWorldPos   = vec3(0.0);
         vNormal     = vec3(0.0, 1.0, 0.0);

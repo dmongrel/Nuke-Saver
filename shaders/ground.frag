@@ -8,6 +8,7 @@
 // derive per-instance colour variation from an interpolated attribute.
 
 #include "atmosphere.glsl"
+#include "fire.glsl"
 #include "noise.glsl"
 
 layout(location = 0) in vec3  vWorldPos;
@@ -23,6 +24,28 @@ void main() {
     vec3  viewDir  = toCamera / max(distance, 1e-4);
 
     vec3 albedo = vAlbedo;
+
+    // The scorched footprint and the collar of stripped dust (spec 7.2).
+    //
+    // Both are surface terms on the desert floor rather than geometry, because both are exactly
+    // that: ground that the blast has changed. The dust *cloud* the collar throws up is a particle
+    // system and arrives with M6; what is here is the mark the shell leaves as it goes over.
+    float shell = scene.blast.w;
+    float ring  = 0.0;
+    if (shell > 0.0) {
+        float d = length(vWorldPos.xz - scene.blast.xz);
+
+        // Scorch: everything the shell has already crossed, worst at the centre. It does not fade
+        // — spec 7.7 wants a debris field over a scorched footprint at the end of the cycle.
+        float burned = 1.0 - smoothstep(0.0, shell, d);
+        albedo = mix(albedo, albedo * vec3(0.16, 0.13, 0.12), burned * 0.88 * (1.0 - vRockiness));
+
+        // The collar, slightly ahead of the shell as spec 7.2 requires, and narrow: a wide one
+        // reads as a second sunset on the sand rather than as a front moving over it.
+        float lead  = shell * 1.06;
+        float width = max(shell * 0.055, 12.0);
+        ring = exp(-((d - lead) * (d - lead)) / (width * width)) * (1.0 - vRockiness);
+    }
 
     // Dunes are normal-map detail, not geometry (spec 6.2). Two scales of gradient noise,
     // differentiated into a slope, and applied only to sand — a mountain face is rock, and
@@ -86,6 +109,19 @@ void main() {
                                  max(scene.boardColor.w * scene.boardColor.w, 1.0));
     lit += albedo * scene.boardColor.rgb *
               max(dot(normal, toBoard / max(boardDist, 1e-3)), 0.0) * falloff;
+
+    // The fireball (spec 8.2). From phase 5 this is the dominant term, by a long way: the
+    // scorched floor around the impact point is lit by nothing else.
+    lit += FireContribution(albedo, vWorldPos, normal);
+
+    // The collar is dust in the air just above the ground, so it is lit by the fireball and
+    // scatters most of it back. Added rather than mixed: it is material between the eye and the
+    // sand, not a different sand.
+    if (ring > 0.0) {
+        vec3 dust = vAlbedo * 1.6 + vec3(0.04);
+        lit += ring * (dust * (scene.keyColor.rgb * 0.35 + skyAmbient * scene.groundColor.w) +
+                       FireIrradiance(vWorldPos, vec3(0.0, 1.0, 0.0)) * dust);
+    }
 
     // Haze, into exactly the sky that is behind this surface (spec 6.3). Using the view ray's own
     // gradient value rather than a single fog colour is what lets the range dissolve into the sky

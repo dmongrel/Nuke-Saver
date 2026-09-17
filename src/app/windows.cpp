@@ -242,6 +242,18 @@ int RunFullScreen(HINSTANCE instance) {
 
     unsigned long long frame = 0;
     MSG                msg{};
+
+    // Spec 11.2 requires the renderer to measure its own frame time over a rolling window. M6 uses
+    // it to drive the quality scaler; for now it is what says whether a milestone met its budget,
+    // which is the only honest way to answer that on a machine whose display this run has taken
+    // over. Measured from the wall clock even when the capture clock is driving the simulation.
+    double     windowSeconds = 0.0;
+    int        windowFrames  = 0;
+    double     worstFrame    = 0.0;
+    double     runSeconds    = 0.0;
+    int        runFrames     = 0;
+    int        overBudget    = 0;
+    LARGE_INTEGER wall = start;
     while (host.running) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
@@ -273,7 +285,31 @@ int RunFullScreen(HINSTANCE instance) {
             break;
         }
 
-        if (LogEnabled() && frame % 600 == 0) Log("frame %llu t=%.3f", frame, elapsed);
+        {
+            LARGE_INTEGER nowWall{};
+            QueryPerformanceCounter(&nowWall);
+            const double real = static_cast<double>(nowWall.QuadPart - wall.QuadPart) /
+                                static_cast<double>(freq.QuadPart);
+            wall = nowWall;
+
+            if (frame > 0) {  // the first frame carries device creation and is not a frame time
+                windowSeconds += real;
+                runSeconds += real;
+                ++windowFrames;
+                ++runFrames;
+                if (real > worstFrame) worstFrame = real;
+                if (real > 1.0 / 60.0) ++overBudget;
+            }
+        }
+
+        if (LogEnabled() && frame % 600 == 0 && windowFrames > 0) {
+            Log("frame %llu t=%.3f  %.1f fps avg, worst %.1f ms over the last %d", frame, elapsed,
+                static_cast<double>(windowFrames) / windowSeconds, worstFrame * 1000.0,
+                windowFrames);
+            windowSeconds = 0.0;
+            windowFrames  = 0;
+            worstFrame    = 0.0;
+        }
         ++frame;
 
         if (host.renderer) host.renderer->RenderFrame(elapsed, delta);
@@ -284,6 +320,12 @@ int RunFullScreen(HINSTANCE instance) {
         // 3440x1440 display that was perfectly capable of more. Only an unpaced backend needs
         // the explicit yield.
         if (!host.renderer || !host.renderer->PacesItself()) Sleep(8);
+    }
+
+    if (runFrames > 0) {
+        Log("performance: %d frames, %.1f fps average, %d over the 16.7 ms budget (%.1f%%)",
+            runFrames, static_cast<double>(runFrames) / runSeconds, overBudget,
+            100.0 * static_cast<double>(overBudget) / static_cast<double>(runFrames));
     }
 
     Log("loop exited after %llu frames", frame);

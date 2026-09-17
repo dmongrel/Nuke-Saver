@@ -53,6 +53,17 @@ struct Subject {
     float height = 0.0f;  // top above the ground
 };
 
+// One thing that has to be in frame, and the stretch of the cycle it has to be in frame for.
+// Spec 11.1 lists five of these and they do not all apply at once: the city has to fit during
+// phase 1 and is rubble by phase 8, the cloud does not exist until phase 8 and is the widest thing
+// in the cycle when it does. Solving every subject over the whole cycle would frame for a cloud
+// that is not there yet and leave the city a speck for the half of the run before it appears.
+struct FramingWindow {
+    Subject subject;
+    float   from = 0.0f;
+    float   to   = 0.0f;
+};
+
 class OrbitCamera {
 public:
     // `cityRadius` is the radius of the city footprint in metres, `cycleSeconds` the full run
@@ -77,6 +88,21 @@ public:
     // presented on every monitor, so this cannot be the actual window's aspect.
     void FrameOn(const Subject& subject, float aspect = 16.0f / 9.0f, float holdFraction = 0.30f,
                  float margin = 0.10f);
+
+    // The same solve against several subjects, each only over the stretch of the cycle where spec
+    // 11.1 requires it. The orbit ends up sized by whichever window binds — the cloud, in
+    // practice, which is what spec 11.1 says it must be.
+    void FrameOn(const FramingWindow* windows, int count, float aspect = 16.0f / 9.0f,
+                 float margin = 0.10f);
+
+    // Where the camera looks, at the start and end of the cycle. Set from outside because the
+    // cloud is what the end of the cycle is about and the camera is built before it exists: a
+    // look-at that stays at city height leaves the cloud in the top third and half the frame full
+    // of empty desert.
+    void SetTargetHeights(float start, float end) {
+        targetHeightStart_ = start;
+        targetHeightEnd_   = end;
+    }
 
     ShotType shot() const { return shot_; }
     float    orbitRadius() const { return radiusMid_; }

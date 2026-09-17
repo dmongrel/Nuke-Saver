@@ -1,0 +1,71 @@
+#version 450
+
+// Auto-exposure, pass two (spec 8.2): reduce the histogram to one number and move toward it.
+//
+// One workgroup of 256, one thread a bin. It reduces, adapts, stores and clears the bins for the
+// next frame, so the histogram pass never has to be preceded by a clear of its own.
+
+#include "exposure.glsl"
+
+layout(local_size_x = kBins) in;
+
+layout(push_constant) uniform Push {
+    float exposure;     // the base exposure of the time of day (spec 5.4)
+    float ditherAmp;
+    float nightShift;
+    float delta;        // seconds since the last frame
+    float width;
+    float height;
+    float minExposure;
+    float maxExposure;
+} pc;
+
+shared float sWeighted[kBins];
+shared float sCount[kBins];
+
+void main() {
+    uint i     = gl_LocalInvocationIndex;
+    uint count = ex.bins[i];
+
+    // Bin 0 is everything below the histogram's floor — the night sky, mostly — and letting it
+    // into the average would peg the exposure to the darkest thing on screen rather than to the
+    // scene. Excluded, which is the standard trick and the reason bin 0 exists as a bucket at all.
+    sWeighted[i] = (i == 0u) ? 0.0 : float(count) * BinToLogLum(float(i));
+    sCount[i]    = (i == 0u) ? 0.0 : float(count);
+
+    barrier();
+
+    for (uint stride = uint(kBins) / 2u; stride > 0u; stride >>= 1u) {
+        if (i < stride) {
+            sWeighted[i] += sWeighted[i + stride];
+            sCount[i] += sCount[i + stride];
+        }
+        barrier();
+    }
+
+    // Every thread clears its own bin on the way out.
+    ex.bins[i] = 0u;
+
+    if (i != 0u) return;
+
+    float total = max(sCount[0], 1.0);
+    float average = exp2(sWeighted[0] / total);
+    if (sCount[0] < 1.0) average = 1.0 / max(pc.exposure, 1e-3);
+
+    // The exposure that puts that average at the key. The base exposure of the time of day is the
+    // reference: it is what the scene was authored to look right at, so a neutral frame must come
+    // out of this very close to unchanged.
+    float target = clamp(kExposureKey / max(average, 1e-6), pc.minExposure, pc.maxExposure);
+
+    float current = ex.initialised > 0.5 ? ex.exposure : target;
+
+    // Spec 8.2: down fast, up slow. 0.2 s to darken, 3 s to brighten. This is the whole effect —
+    // the flash slams the exposure down in a fifth of a second and it takes three to come back,
+    // and that recovery is what the eye reads as having been blinded.
+    float tau  = target < current ? 0.20 : 3.0;
+    float rate = 1.0 - exp(-max(pc.delta, 0.0) / tau);
+
+    ex.exposure    = mix(current, target, rate);
+    ex.measured    = average;
+    ex.initialised = 1.0;
+}

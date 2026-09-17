@@ -41,6 +41,25 @@ public:
 
     VkImageView hdrView() const { return hdrView_; }
 
+    // The bloom chain of spec 8.1: one image, mip 0 at half the swapchain, five or six levels.
+    // Sized with the swapchain, so it lives here rather than with the pipelines.
+    //
+    // Every level is kept in VK_IMAGE_LAYOUT_GENERAL for the whole frame. The chain is written by
+    // compute and read by compute, level by level, and alternating each mip between GENERAL and
+    // SHADER_READ_ONLY would be a dozen barriers a frame to buy a layout optimisation that does
+    // not exist on a tiler-free desktop GPU.
+    uint32_t    bloomLevels() const { return static_cast<uint32_t>(bloomViews_.size()); }
+    VkImageView bloomView(uint32_t level) const { return bloomViews_[level]; }
+    VkImage     bloomImage() const { return bloomImage_; }
+    VkExtent2D  bloomExtent(uint32_t level) const {
+        VkExtent2D e{extent_.width / 2, extent_.height / 2};
+        for (uint32_t i = 0; i < level; ++i) {
+            e.width  = e.width > 1 ? e.width / 2 : 1;
+            e.height = e.height > 1 ? e.height / 2 : 1;
+        }
+        return {e.width ? e.width : 1, e.height ? e.height : 1};
+    }
+
     // Marks the swapchain as needing rebuild before the next frame, after a resize or an
     // out-of-date present.
     void Invalidate() { needsRebuild_ = true; }
@@ -88,6 +107,7 @@ private:
     WindowTarget() = default;
 
     void DestroySizedResources(Context& ctx);
+    bool CreateBloomChain(Context& ctx);
 
     // Held so the destructor can free GPU objects. The Context always outlives every target:
     // the renderer owns both and destroys the targets first.
@@ -109,6 +129,10 @@ private:
     VkImage       hdrImage_ = VK_NULL_HANDLE;
     VmaAllocation hdrAlloc_ = VK_NULL_HANDLE;
     VkImageView   hdrView_  = VK_NULL_HANDLE;
+
+    VkImage                  bloomImage_ = VK_NULL_HANDLE;
+    VmaAllocation            bloomAlloc_ = VK_NULL_HANDLE;
+    std::vector<VkImageView> bloomViews_;
 
     VkImage       depthImage_ = VK_NULL_HANDLE;
     VmaAllocation depthAlloc_ = VK_NULL_HANDLE;

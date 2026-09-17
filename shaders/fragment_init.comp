@@ -1,0 +1,156 @@
+#version 450
+
+// Shatters every box in the world into triangles, once, at world build (spec 7.3).
+//
+// This runs on the GPU rather than on the CPU not to be fast but to keep a rule: the CPU writes
+// 728 box descriptions and nothing else. Nine megabytes of triangle corners never cross the bus
+// and never exist in host memory.
+//
+// Faces are subdivided on a jittered grid. The jitter is a function of the grid *vertex*, not of
+// the quad, so neighbouring quads that share an edge use the same two displaced corners and the
+// surface has no cracks in it before the blast makes some.
+
+#define FRAGMENT_SET 0
+#include "fragment_common.glsl"
+
+layout(local_size_x = 64) in;
+
+// A face's quad budget is fixed, and the grid it is cut into is the divisor pair of that budget
+// closest to the face's own aspect ratio. That keeps the chips roughly square on a squat warehouse
+// and on a tower alike, while the count per box stays exactly what the quality level asked for —
+// which is what lets a fragment index be divided straight back into a box index with no table.
+ivec2 GridFor(int quads, float width, float height) {
+    float aspect = max(width, 1e-3) / max(height, 1e-3);
+
+    ivec2 best     = ivec2(1, quads);
+    float bestCost = 1e9;
+
+    for (int nu = 1; nu <= quads; ++nu) {
+        if (quads % nu != 0) continue;
+        int   nv   = quads / nu;
+        float cost = abs(log(float(nu) / float(nv)) - log(aspect));
+        if (cost < bestCost) {
+            bestCost = cost;
+            best     = ivec2(nu, nv);
+        }
+    }
+    return best;
+}
+
+// The jitter applied to one grid vertex, in cell fractions. Corners on the face's boundary are
+// pinned so a box's silhouette stays a box until it comes apart.
+vec2 VertexJitter(uint boxIndex, int face, ivec2 cell, ivec2 grid) {
+    vec2 j = vec2(0.0);
+    uint s = boxIndex * 977u + uint(face) * 131u + uint(cell.x) * 17u + uint(cell.y) * 5779u;
+
+    if (cell.x > 0 && cell.x < grid.x) j.x = (FragHash(s, 1u) - 0.5) * 0.62;
+    if (cell.y > 0 && cell.y < grid.y) j.y = (FragHash(s, 2u) - 0.5) * 0.62;
+    return j;
+}
+
+// A point on one face of the unit box, in the box's own frame. `t` runs 0..1 across the face and
+// `s` 0..1 up it, in the orientation named by the face index.
+vec3 FacePoint(int face, vec2 uv, vec2 halfExtent, float height) {
+    float hx = halfExtent.x;
+    float hz = halfExtent.y;
+
+    vec2 p = uv * 2.0 - 1.0;  // -1..1
+
+    // Wound so that cross(b - a, c - a) comes out pointing away from the box on every face. The
+    // draw decides which side of a chip is its front from that normal, so a face wound the other
+    // way would be lit on its inside for the rest of the cycle.
+    if (face == 0) return vec3(hx, uv.y * height, -p.x * hz);         // +X
+    if (face == 1) return vec3(-hx, uv.y * height, p.x * hz);         // -X
+    if (face == 2) return vec3(p.x * hx, uv.y * height, hz);          // +Z
+    if (face == 3) return vec3(-p.x * hx, uv.y * height, -hz);        // -Z
+    if (face == 4) return vec3(p.x * hx, height, -p.y * hz);          // +Y, the roof
+    return vec3(p.x * hx, 0.0, p.y * hz);                             // -Y, the underside
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+
+    if (i >= fp.counts.y) return;
+
+    uint boxIndex = FragmentBox(i, fp.counts.x);
+
+    ShatterBox box   = boxes[boxIndex];
+    uint       local = i - uint(box.color.w + 0.5);
+
+    vec2  halfExtent = box.extentQuads.xy;
+    float height     = box.extentQuads.z;
+
+    int sideQuads = int(box.extentQuads.w + 0.5);
+    int capQuads  = BoxCapQuads(sideQuads);
+
+    uint quad = local >> 1u;
+    uint tri  = local & 1u;
+
+    int   face;
+    int   cellIndex;
+    int   quadsHere;
+    if (quad < uint(4 * sideQuads)) {
+        face      = int(quad) / sideQuads;
+        cellIndex = int(quad) % sideQuads;
+        quadsHere = sideQuads;
+    } else {
+        uint q    = quad - uint(4 * sideQuads);
+        face      = 4 + int(q) / capQuads;
+        cellIndex = int(q) % capQuads;
+        quadsHere = capQuads;
+    }
+
+    // The face's real size in metres, so the grid is chosen from the shape rather than the index.
+    float faceW = (face == 0 || face == 1)   ? halfExtent.y * 2.0
+                  : (face == 2 || face == 3) ? halfExtent.x * 2.0
+                                             : halfExtent.x * 2.0;
+    float faceH = (face >= 4) ? halfExtent.y * 2.0 : height;
+
+    ivec2 grid = GridFor(quadsHere, faceW, faceH);
+    ivec2 cell = ivec2(cellIndex % grid.x, cellIndex / grid.x);
+
+    vec2 step = vec2(1.0) / vec2(grid);
+
+    vec2 uv00 = (vec2(cell) + VertexJitter(boxIndex, face, cell, grid)) * step;
+    vec2 uv10 = (vec2(cell + ivec2(1, 0)) + VertexJitter(boxIndex, face, cell + ivec2(1, 0), grid)) * step;
+    vec2 uv11 = (vec2(cell + ivec2(1, 1)) + VertexJitter(boxIndex, face, cell + ivec2(1, 1), grid)) * step;
+    vec2 uv01 = (vec2(cell + ivec2(0, 1)) + VertexJitter(boxIndex, face, cell + ivec2(0, 1), grid)) * step;
+
+    vec3 a, b, c;
+    if (tri == 0u) {
+        a = FacePoint(face, uv00, halfExtent, height);
+        b = FacePoint(face, uv10, halfExtent, height);
+        c = FacePoint(face, uv11, halfExtent, height);
+    } else {
+        a = FacePoint(face, uv00, halfExtent, height);
+        b = FacePoint(face, uv11, halfExtent, height);
+        c = FacePoint(face, uv01, halfExtent, height);
+    }
+
+    // Out of the box's frame and into the world. Same rotation the box's own vertex shader applies.
+    float cs = cos(box.centerYaw.w);
+    float sn = sin(box.centerYaw.w);
+
+    vec3 origin = vec3(box.centerYaw.x, box.centerYaw.y, box.centerYaw.z);
+
+    vec3 wa = origin + vec3(a.x * cs - a.z * sn, a.y, a.x * sn + a.z * cs);
+    vec3 wb = origin + vec3(b.x * cs - b.z * sn, b.y, b.x * sn + b.z * cs);
+    vec3 wc = origin + vec3(c.x * cs - c.z * sn, c.y, c.x * sn + c.z * cs);
+
+    vec3 anchor = (wa + wb + wc) / 3.0;
+
+    // Spec 5.2: the parent's colour, varied per fragment. A chip is a chip of one building, but no
+    // two chips of it catch the light identically.
+    float tint  = 0.82 + 0.36 * FragHash(i, 71u);
+    vec3  color = box.color.rgb * tint;
+
+    rest[i].anchor = vec4(anchor, float(boxIndex));
+    rest[i].c0       = vec4(wa - anchor, color.r);
+    rest[i].c1       = vec4(wb - anchor, color.g);
+    rest[i].c2       = vec4(wc - anchor, color.b);
+
+    state[i].pos  = vec4(anchor, kFragIntact);
+    state[i].vel  = vec4(0.0);
+    state[i].quat = vec4(0.0, 0.0, 0.0, 1.0);
+    state[i].spin = vec4(0.0, 0.0, 0.0, FragHash(i, 101u));
+}

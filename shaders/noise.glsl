@@ -48,4 +48,43 @@ float Fbm2(vec2 p, int octaves) {
     return sum;
 }
 
+// Three dimensions, for the things that are volumes rather than surfaces: the star field, the
+// fireball's skin and the smoke. Value noise rather than gradient noise here — the fireball's
+// displacement is never differentiated, so the extra eight dot products a gradient version costs
+// buy nothing visible.
+float Hash13(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return fract((p.x + p.y) * p.z);
+}
+
+float ValueNoise3(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = p - i;
+    vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+
+    float n000 = Hash13(i + vec3(0.0, 0.0, 0.0));
+    float n100 = Hash13(i + vec3(1.0, 0.0, 0.0));
+    float n010 = Hash13(i + vec3(0.0, 1.0, 0.0));
+    float n110 = Hash13(i + vec3(1.0, 1.0, 0.0));
+    float n001 = Hash13(i + vec3(0.0, 0.0, 1.0));
+    float n101 = Hash13(i + vec3(1.0, 0.0, 1.0));
+    float n011 = Hash13(i + vec3(0.0, 1.0, 1.0));
+    float n111 = Hash13(i + vec3(1.0, 1.0, 1.0));
+
+    return mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y),
+               mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z) * 2.0 - 1.0;
+}
+
+float Fbm3(vec3 p, int octaves) {
+    float sum = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < octaves; ++i) {
+        sum += ValueNoise3(p) * amp;
+        p *= 2.07;
+        amp *= 0.5;
+    }
+    return sum;
+}
+
 #endif

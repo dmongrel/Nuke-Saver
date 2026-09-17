@@ -178,6 +178,10 @@ void TestUnitCube();
 void TestFraming();
 void TestTimeline();
 void TestBoard();
+void TestDetonation();
+void TestFragmentLayout();
+void TestMissile();
+void TestFireAndFlash();
 }  // namespace selftest
 
 int main() {
@@ -197,6 +201,10 @@ int main() {
     selftest::TestFraming();
     selftest::TestTimeline();
     selftest::TestBoard();
+    selftest::TestDetonation();
+    selftest::TestFragmentLayout();
+    selftest::TestMissile();
+    selftest::TestFireAndFlash();
     TestArgs();
     TestInputWatcher();
     TestSettings();

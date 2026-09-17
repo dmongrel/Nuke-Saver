@@ -118,8 +118,8 @@ bool CreateRenderPasses(Context& ctx, RenderPasses* out) {
     hdrSubpass.pColorAttachments       = &hdrColorRef;
     hdrSubpass.pDepthStencilAttachment = &hdrDepthRef;
 
-    // The tonemap pass samples this attachment, so the write has to be visible to a fragment
-    // shader read before it runs.
+    // The tonemap pass samples this attachment and the auto-exposure histogram of spec 8.2 reads
+    // it from compute, so the write has to be visible to both before either runs.
     VkSubpassDependency hdrDeps[2]{};
     hdrDeps[0].srcSubpass    = VK_SUBPASS_EXTERNAL;
     hdrDeps[0].dstSubpass    = 0;
@@ -134,7 +134,8 @@ bool CreateRenderPasses(Context& ctx, RenderPasses* out) {
     hdrDeps[1].srcSubpass    = 0;
     hdrDeps[1].dstSubpass    = VK_SUBPASS_EXTERNAL;
     hdrDeps[1].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    hdrDeps[1].dstStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    hdrDeps[1].dstStageMask =
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     hdrDeps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     hdrDeps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
@@ -282,6 +283,12 @@ void WindowTarget::DestroySizedResources(Context& ctx) {
     imageViews_.clear();
     images_.clear();
 
+    for (VkImageView v : bloomViews_) vkDestroyImageView(dev, v, nullptr);
+    bloomViews_.clear();
+    if (bloomImage_) vmaDestroyImage(ctx.allocator(), bloomImage_, bloomAlloc_);
+    bloomImage_ = VK_NULL_HANDLE;
+    bloomAlloc_ = VK_NULL_HANDLE;
+
     if (hdrView_) vkDestroyImageView(dev, hdrView_, nullptr);
     if (hdrImage_) vmaDestroyImage(ctx.allocator(), hdrImage_, hdrAlloc_);
     hdrView_  = VK_NULL_HANDLE;
@@ -293,6 +300,60 @@ void WindowTarget::DestroySizedResources(Context& ctx) {
     depthView_  = VK_NULL_HANDLE;
     depthImage_ = VK_NULL_HANDLE;
     depthAlloc_ = VK_NULL_HANDLE;
+}
+
+// Spec 8.1 asks for five or six mips. Six on a 4K display, five on 1080p — the chain stops when a
+// level would be narrower than four texels, below which the tent filter is reading mostly itself.
+bool WindowTarget::CreateBloomChain(Context& ctx) {
+    uint32_t levels = 1;
+    {
+        VkExtent2D e = bloomExtent(0);
+        while (levels < 6 && e.width > 8 && e.height > 8) {
+            ++levels;
+            e = bloomExtent(levels - 1);
+        }
+    }
+
+    VkImageCreateInfo ici{};
+    ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = kHdrFormat;
+    ici.extent        = {bloomExtent(0).width, bloomExtent(0).height, 1};
+    ici.mipLevels     = levels;
+    ici.arrayLayers   = 1;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo aci{};
+    aci.usage    = VMA_MEMORY_USAGE_AUTO;
+    aci.priority = 1.0f;
+
+    if (vmaCreateImage(ctx.allocator(), &ici, &aci, &bloomImage_, &bloomAlloc_, nullptr) !=
+        VK_SUCCESS) {
+        return false;
+    }
+
+    // One view per level. A storage image binding names a single mip, and the downsample writes
+    // one while sampling the one above it, so the two cannot share a view.
+    bloomViews_.resize(levels, VK_NULL_HANDLE);
+    for (uint32_t i = 0; i < levels; ++i) {
+        VkImageViewCreateInfo vci{};
+        vci.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.image                           = bloomImage_;
+        vci.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format                          = kHdrFormat;
+        vci.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.baseMipLevel   = i;
+        vci.subresourceRange.levelCount     = 1;
+        vci.subresourceRange.layerCount     = 1;
+        if (vkCreateImageView(ctx.device(), &vci, nullptr, &bloomViews_[i]) != VK_SUCCESS) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool WindowTarget::Rebuild(Context& ctx, const RenderPasses& passes, uint32_t width,
@@ -405,6 +466,11 @@ bool WindowTarget::Rebuild(Context& ctx, const RenderPasses& passes, uint32_t wi
                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                        VK_IMAGE_ASPECT_COLOR_BIT, &hdrImage_, &hdrAlloc_, &hdrView_)) {
         app::Log("vulkan: hdr target allocation failed");
+        return false;
+    }
+
+    if (!CreateBloomChain(ctx)) {
+        app::Log("vulkan: bloom chain allocation failed");
         return false;
     }
 

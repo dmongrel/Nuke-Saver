@@ -15,6 +15,7 @@
 #include "app/log.h"
 #include "app/settings.h"
 #include "render/building_data.h"
+#include "render/fragment_data.h"
 #include "render/scene_uniforms.h"
 #include "render/shaders_embedded.h"
 #include "render/vk/buffer.h"
@@ -23,6 +24,7 @@
 #include "world/world.h"
 
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -45,11 +47,89 @@ struct BoardPush {
     float    emissive = 0.0f;
 };
 
-struct TonemapPush {
-    float exposure;
-    float ditherAmp;
-    float nightShift;
+// Everything the fragment simulation needs, in one 96-byte push block (spec 7.3 to 7.7). A push
+// constant rather than a uniform buffer because it changes every frame, is read by every one of
+// 150,000 invocations, and is small enough that the driver keeps it in registers.
+struct FragmentPush {
+    uint32_t counts[4]{};   // box count, total fragments, unused, unused
+    float    blast[4]{};    // xyz impact point, w shell radius
+    float    timing[4]{};   // x cycle seconds, y delta, z gather start, w gather end
+    float    release[4]{};  // x disperse start, y disperse end, z cloud growth, w city radius
+    float    wind[4]{};     // xyz m/s, w gravity
+    float    cloud[4]{};    // x stem height, y cap height, z cap radius, w cap tube
 };
+
+static_assert(sizeof(FragmentPush) == 96, "FragmentPush must fit the guaranteed push range");
+
+// The missile's model matrix (spec 7.1). The only pipeline here with one: everything else in the
+// scene is either world-space geometry or an instance stream carrying its own placement.
+struct MissilePush {
+    float model[16]{};
+    float exhaust[4]{};  // x = plume emissive magnitude, yzw reserved
+};
+
+static_assert(sizeof(MissilePush) == 80, "MissilePush must fit the guaranteed push range");
+
+// The fireball's sphere is built from gl_VertexIndex alone, so the draw has to name the vertex
+// count the shader's grid implies. These MUST match shaders/fireball.vert.
+constexpr uint32_t kFireballRings    = 40;
+constexpr uint32_t kFireballSegments = 72;
+constexpr uint32_t kFireballVertices = kFireballRings * kFireballSegments * 6;
+
+// Shared by the tonemap and by the two auto-exposure compute passes, because all three want most
+// of the same numbers and a second block would be two places to keep the extent in step.
+struct TonemapPush {
+    float exposure    = 1.0f;  // the base exposure of the time of day (spec 5.4)
+    float ditherAmp   = 1.0f;
+    float nightShift  = 0.0f;
+    float delta       = 0.0f;
+    float width       = 0.0f;
+    float height      = 0.0f;
+    float minExposure = 0.0f;
+    float maxExposure = 0.0f;
+    float bloom       = 0.0f;  // how much of the bloom chain is added back (spec 8.1)
+    float pad0        = 0.0f;
+    float pad1        = 0.0f;
+    float pad2        = 0.0f;
+};
+
+static_assert(sizeof(TonemapPush) == 48, "TonemapPush must fit the guaranteed push range");
+
+// The bloom chain (spec 8.1). Both halves share one block so they can share one layout.
+struct BloomPush {
+    float destinationWidth  = 0.0f;
+    float destinationHeight = 0.0f;
+    float threshold         = 0.0f;
+    float knee              = 0.0f;
+    float firstLevel        = 0.0f;
+    float intensity         = 0.0f;
+    float pad0              = 0.0f;
+    float pad1              = 0.0f;
+};
+
+static_assert(sizeof(BloomPush) == 32, "BloomPush must fit the guaranteed push range");
+
+// Spec 5.1 puts the countdown segments at 30-60 linear and the fireball in the thousands, all
+// against a scene whose middle grey is 1. The threshold sits above the brightest ordinary surface
+// and below the dimmest thing that is meant to glow — at 1.4 the twilight horizon band itself
+// crossed it and the whole sky glowed.
+constexpr float kBloomThreshold = 3.0f;
+constexpr float kBloomKnee      = 1.5f;
+constexpr float kBloomIntensity = 0.75f;  // per upsample step
+
+// How much of the finished chain goes back into the frame. Small, and it has to be: level 0 of the
+// chain is a half-resolution copy of everything above the threshold, so adding it at anything near
+// 1 doubles every bright surface rather than haloing it. At 0.9 the countdown board stopped being
+// eight digits and became one white rectangle.
+constexpr float kBloomMix = 0.08f;
+
+// What the descriptor pool is sized for. The window target stops the chain when a level would be
+// too small to filter, so a given monitor may use fewer.
+constexpr uint32_t kMaxBloomLevels = 6;
+
+// Mirrors the Exposure block in shaders/exposure.glsl.
+constexpr uint32_t kExposureBins  = 256;
+constexpr size_t   kExposureBytes = 4 * sizeof(float) + kExposureBins * sizeof(uint32_t);
 
 VkShaderModule LoadShader(VkDevice device, const char* name) {
     const ShaderBlob* blob = shader_blob(name);
@@ -87,7 +167,34 @@ struct PipelineDesc {
     enum class Vertices { None, World, Building, Board };
     Vertices         vertices     = Vertices::None;
     bool             backfaceCull = false;
+    // A second set, for the one pipeline that needs the scene uniforms and the fragment buffers
+    // at the same time. Nothing else here has more than one.
+    uint32_t         setCount     = 1;
+    // Additive blending, for the emissive passes that add light to what is already there rather
+    // than replacing it: the flash, the fireball, the ground ring.
+    bool             additive     = false;
 };
+
+VkPipeline CreateComputePipeline(VkDevice dev, const char* name, VkPipelineLayout layout) {
+    VkShaderModule module = LoadShader(dev, name);
+    if (!module) return VK_NULL_HANDLE;
+
+    VkComputePipelineCreateInfo ci{};
+    ci.sType        = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    ci.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    ci.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+    ci.stage.module = module;
+    ci.stage.pName  = "main";
+    ci.layout       = layout;
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ci, nullptr, &pipeline) != VK_SUCCESS) {
+        app::Log("vulkan: compute pipeline '%s' failed", name);
+        pipeline = VK_NULL_HANDLE;
+    }
+    vkDestroyShaderModule(dev, module, nullptr);
+    return pipeline;
+}
 
 VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
     VkShaderModule vert = LoadShader(dev, desc.vert);
@@ -199,6 +306,17 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
     VkPipelineColorBlendAttachmentState blendAttachment{};
     blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                      VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    if (desc.additive) {
+        // Source alpha as the coverage term, so one pipeline serves both a hard add (alpha 1) and
+        // a soft-edged one (the fireball's rim, the ring's falloff) without a second blend state.
+        blendAttachment.blendEnable         = VK_TRUE;
+        blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.colorBlendOp        = VK_BLEND_OP_ADD;
+        blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+    }
 
     VkPipelineColorBlendStateCreateInfo blend{};
     blend.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -245,8 +363,9 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
 
 class VulkanRenderer final : public Renderer {
 public:
-    VulkanRenderer(std::unique_ptr<Context> ctx, const world::World& world)
-        : ctx_(std::move(ctx)), world_(world) {}
+    VulkanRenderer(std::unique_ptr<Context> ctx, const app::Settings& settings,
+                   const world::World& world)
+        : ctx_(std::move(ctx)), settings_(settings), world_(world) {}
 
     ~VulkanRenderer() override {
         if (!ctx_) return;
@@ -261,10 +380,27 @@ public:
         vk::DestroyBuffer(*ctx_, &terrainIndices_);
         vk::DestroyBuffer(*ctx_, &horizonVertices_);
         vk::DestroyBuffer(*ctx_, &horizonIndices_);
+        vk::DestroyBuffer(*ctx_, &missileVertices_);
+        vk::DestroyBuffer(*ctx_, &missileIndices_);
         vk::DestroyBuffer(*ctx_, &boxVertices_);
         vk::DestroyBuffer(*ctx_, &boxIndices_);
         vk::DestroyBuffer(*ctx_, &buildingInstances_);
         vk::DestroyBuffer(*ctx_, &boardInstances_);
+        vk::DestroyBuffer(*ctx_, &shatterBoxes_);
+        vk::DestroyBuffer(*ctx_, &fragmentRest_);
+        vk::DestroyBuffer(*ctx_, &fragmentState_);
+
+        if (fragmentPipeline_) vkDestroyPipeline(dev, fragmentPipeline_, nullptr);
+        if (fragmentSimPipeline_) vkDestroyPipeline(dev, fragmentSimPipeline_, nullptr);
+        if (fragmentInitPipeline_) vkDestroyPipeline(dev, fragmentInitPipeline_, nullptr);
+        if (fragmentDrawLayout_) vkDestroyPipelineLayout(dev, fragmentDrawLayout_, nullptr);
+        if (fragmentComputeLayout_) vkDestroyPipelineLayout(dev, fragmentComputeLayout_, nullptr);
+        if (fragmentSetLayout_) vkDestroyDescriptorSetLayout(dev, fragmentSetLayout_, nullptr);
+
+        if (flashPipeline_) vkDestroyPipeline(dev, flashPipeline_, nullptr);
+        if (fireballPipeline_) vkDestroyPipeline(dev, fireballPipeline_, nullptr);
+        if (missilePipeline_) vkDestroyPipeline(dev, missilePipeline_, nullptr);
+        if (missilePipelineLayout_) vkDestroyPipelineLayout(dev, missilePipelineLayout_, nullptr);
 
         if (boardPipeline_) vkDestroyPipeline(dev, boardPipeline_, nullptr);
         if (boardPipelineLayout_) vkDestroyPipelineLayout(dev, boardPipelineLayout_, nullptr);
@@ -274,6 +410,13 @@ public:
         if (scenePipelineLayout_) vkDestroyPipelineLayout(dev, scenePipelineLayout_, nullptr);
         if (sceneSetLayout_) vkDestroyDescriptorSetLayout(dev, sceneSetLayout_, nullptr);
 
+        if (bloomUpPipeline_) vkDestroyPipeline(dev, bloomUpPipeline_, nullptr);
+        if (bloomDownPipeline_) vkDestroyPipeline(dev, bloomDownPipeline_, nullptr);
+        if (bloomPipelineLayout_) vkDestroyPipelineLayout(dev, bloomPipelineLayout_, nullptr);
+        if (bloomSetLayout_) vkDestroyDescriptorSetLayout(dev, bloomSetLayout_, nullptr);
+
+        if (adaptPipeline_) vkDestroyPipeline(dev, adaptPipeline_, nullptr);
+        if (histogramPipeline_) vkDestroyPipeline(dev, histogramPipeline_, nullptr);
         if (tonemapPipeline_) vkDestroyPipeline(dev, tonemapPipeline_, nullptr);
         if (tonemapPipelineLayout_) vkDestroyPipelineLayout(dev, tonemapPipelineLayout_, nullptr);
         if (tonemapSetLayout_) vkDestroyDescriptorSetLayout(dev, tonemapSetLayout_, nullptr);
@@ -288,6 +431,9 @@ public:
         if (!CreateDescriptorPool()) return false;
         if (!CreateSceneLayout()) return false;
         if (!CreateBoardLayout()) return false;
+        if (!CreateMissileLayout()) return false;
+        if (!CreateBloomLayout()) return false;
+        if (!CreateFragmentLayout()) return false;
         if (!CreateTonemapLayout()) return false;
 
         VkDevice dev = ctx_->device();
@@ -319,10 +465,59 @@ public:
                   PipelineDesc::Vertices::Board, true});
         if (!boardPipeline_) return false;
 
+        // The missile (spec 7.1). Its own layout, for the model matrix, and not back-face culled:
+        // it is four hundred triangles, so culling saves nothing measurable, and getting the
+        // winding of a hand-built body of revolution backwards would make the whole missile
+        // invisible rather than wrong — a failure with no symptom to debug from.
+        missilePipeline_ = CreateGraphicsPipeline(
+            dev, {"missile.vert", "missile.frag", passes_.hdr, missilePipelineLayout_, true, true,
+                  PipelineDesc::Vertices::World, false});
+        if (!missilePipeline_) return false;
+
+        // The fragments. No vertex buffer: three vertices an instance, everything else read out
+        // of the storage buffers. Double-sided, because spec 7.3 says a tumbling chip must show
+        // both of its faces.
+        fragmentPipeline_ = CreateGraphicsPipeline(
+            dev, {"fragment.vert", "fragment.frag", passes_.hdr, fragmentDrawLayout_, true, true,
+                  PipelineDesc::Vertices::None, false, 2});
+        if (!fragmentPipeline_) return false;
+
+        // The fireball (spec 7.2): additive, depth tested against the scene so buildings in front
+        // of it occlude it, and not depth written, because it is light rather than surface. Not
+        // culled — it decides its own near hemisphere in the fragment shader, which is the one
+        // way to be sure of it regardless of the viewport's handedness.
+        fireballPipeline_ = CreateGraphicsPipeline(
+            dev, {"fireball.vert", "fireball.frag", passes_.hdr, scenePipelineLayout_, true, false,
+                  PipelineDesc::Vertices::None, false, 1, true});
+        if (!fireballPipeline_) return false;
+
+        // The flash (spec 7.2). Fullscreen, additive, no depth at all: it is in front of
+        // everything including the fireball, which is the point of a flash.
+        flashPipeline_ = CreateGraphicsPipeline(
+            dev, {"fullscreen.vert", "flash.frag", passes_.hdr, scenePipelineLayout_, false, false,
+                  PipelineDesc::Vertices::None, false, 1, true});
+        if (!flashPipeline_) return false;
+
+        fragmentInitPipeline_ = CreateComputePipeline(dev, "fragment_init.comp",
+                                                      fragmentComputeLayout_);
+        fragmentSimPipeline_  = CreateComputePipeline(dev, "fragment_sim.comp",
+                                                      fragmentComputeLayout_);
+        if (!fragmentInitPipeline_ || !fragmentSimPipeline_) return false;
+
         tonemapPipeline_ = CreateGraphicsPipeline(
             dev, {"fullscreen.vert", "tonemap.frag", passes_.present, tonemapPipelineLayout_, false,
                   false, PipelineDesc::Vertices::None, false});
         if (!tonemapPipeline_) return false;
+
+        // Auto-exposure (spec 8.2). Both passes share the tonemap's set and push block.
+        histogramPipeline_ =
+            CreateComputePipeline(dev, "exposure_histogram.comp", tonemapPipelineLayout_);
+        adaptPipeline_ = CreateComputePipeline(dev, "exposure_adapt.comp", tonemapPipelineLayout_);
+        if (!histogramPipeline_ || !adaptPipeline_) return false;
+
+        bloomDownPipeline_ = CreateComputePipeline(dev, "bloom_down.comp", bloomPipelineLayout_);
+        bloomUpPipeline_   = CreateComputePipeline(dev, "bloom_up.comp", bloomPipelineLayout_);
+        if (!bloomDownPipeline_ || !bloomUpPipeline_) return false;
 
         return UploadStaticGeometry();
     }
@@ -348,9 +543,36 @@ public:
             BindUniformBuffer(a.sceneSet[i], a.sceneUbo[i]);
         }
 
-        if (!AllocateSet(tonemapSetLayout_, &a.tonemapSet)) {
+        // Host visible, and zeroed here rather than by a staging copy. The shader reads this buffer
+        // before it writes it — `initialised` at 0 is what tells the first adapt to jump straight
+        // to the measured value instead of easing up from black — and being able to read it back
+        // is what makes the adaptation debuggable at all: without it, "the frame is too bright" has
+        // the exposure, the histogram, the bloom and four surface shaders as suspects.
+        //
+        // The reference machine is an iGPU, where device-local memory is host-visible anyway, so
+        // this costs nothing on it. On a discrete card it would put a per-frame compute write over
+        // PCIe; if that ever matters, the readback is the part to drop, not the buffer.
+        if (!vk::CreateBuffer(*ctx_, kExposureBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                              vk::BufferUse::HostWritable, &a.exposure) ||
+            !AllocateSet(tonemapSetLayout_, &a.tonemapSet)) {
             DestroyAttached(a);
             return false;
+        }
+        if (a.exposure.mapped) std::memset(a.exposure.mapped, 0, kExposureBytes);
+        BindExposureBuffer(a.tonemapSet, a.exposure);
+
+        const uint32_t levels = a.target->bloomLevels();
+        a.bloomDown.assign(levels, VK_NULL_HANDLE);
+        a.bloomUp.assign(levels, VK_NULL_HANDLE);
+        for (uint32_t i = 0; i < levels; ++i) {
+            if (!AllocateSet(bloomSetLayout_, &a.bloomDown[i])) {
+                DestroyAttached(a);
+                return false;
+            }
+            if (i > 0 && !AllocateSet(bloomSetLayout_, &a.bloomUp[i])) {
+                DestroyAttached(a);
+                return false;
+            }
         }
 
         windows_.push_back(std::move(a));
@@ -377,24 +599,58 @@ public:
         }
     }
 
-    void RenderFrame(double elapsed, double) override {
+    void RenderFrame(double elapsed, double delta) override {
         if (!ctx_ || ctx_->deviceLost()) return;
 
-        const float t = static_cast<float>(elapsed);
+        // Spec 4.1: one cycle runs, then repeats with a new seed. The host's clock never resets,
+        // so the cycle's own time is measured from where this cycle began.
+        if (elapsed - cycleBase_ >= static_cast<double>(world_.cycleSeconds)) {
+            cycleBase_ = elapsed;
+            ResetCycle();
+        }
+
+        const float t = static_cast<float>(elapsed - cycleBase_);
+
+        // Spec 4.2 clamps the delta before it reaches the simulation; the host already did, and
+        // this floor keeps a 1000 fps frame from stepping the springs by nothing at all.
+        const float dt = static_cast<float>(delta) < 1.0f / 480.0f ? 1.0f / 480.0f
+                                                                   : static_cast<float>(delta);
+
+        // The fragment simulation belongs to the world, not to a window: it is stepped once, in
+        // whichever command buffer opens first, and every monitor then draws the same state.
+        bool simulated = false;
 
         for (auto& w : windows_) {
             WindowTarget::Frame frame = w.target->Begin(*ctx_, passes_);
             if (!frame.valid) continue;
 
             frameTime_ = t;
+
+            if (!simulated) {
+                RecordFragmentSim(frame.cmd, t, dt);
+                simulated = true;
+            }
             UpdateSceneUniforms(w, frame.frameSlot, t);
             RefreshTonemapBinding(w);
 
             RecordScene(frame, w);
-            RecordTonemap(frame, w);
+            RecordBloom(frame, w);
+            RecordExposure(frame, w, dt);
+            RecordTonemap(frame, w, dt);
 
             const bool capturing = capture_.enabled && frameCounter_ == capture_.atFrame;
             if (capturing) {
+                if (w.exposure.mapped) {
+                    const float* state = static_cast<const float*>(w.exposure.mapped);
+                    app::Log("capture: exposure %.4f (base %.4f), measured luminance %.5f, "
+                             "initialised %.0f",
+                             state[0], world_.sky.baseExposure, state[2], state[1]);
+                }
+                if (world_.MissileVisible(frameTime_)) {
+                    const core::Vec3 at = world_.detonation.MissileAt(world_.timeline, frameTime_);
+                    app::Log("capture: missile at %.0f %.0f %.0f, %u indices", at.x, at.y, at.z,
+                             missileIndexCount_);
+                }
                 app::Log("capture: frame %d t=%.3fs phase=%d rise=%.2f boardSeconds=%d mask=%llx",
                          frameCounter_, t, static_cast<int>(world_.timeline.Primary(t)),
                          world_.BoardRise(t), world_.timeline.BoardSeconds(t),
@@ -426,25 +682,45 @@ private:
         VkDescriptorSet               sceneSet[kFramesInFlight]{};
         VkDescriptorSet               tonemapSet   = VK_NULL_HANDLE;
         VkImageView                   boundHdrView = VK_NULL_HANDLE;
+
+        // Auto-exposure state (spec 8.2). Per window, because two monitors showing the same world
+        // from different aspect ratios do not see the same average luminance, and because the
+        // adaptation has to carry across frames.
+        Buffer exposure{};
+
+        // Bloom, one descriptor set per step. `bloomDown[i]` reads level i-1 (or the HDR image at
+        // i == 0) and writes level i; `bloomUp[i]` reads level i and adds into level i-1.
+        std::vector<VkDescriptorSet> bloomDown;
+        std::vector<VkDescriptorSet> bloomUp;
     };
 
     void DestroyAttached(Attached& a) {
         for (uint32_t i = 0; i < kFramesInFlight; ++i) vk::DestroyBuffer(*ctx_, &a.sceneUbo[i]);
+        vk::DestroyBuffer(*ctx_, &a.exposure);
         a.target.reset();
         // Descriptor sets are freed with the pool, which outlives every window.
     }
 
     bool CreateDescriptorPool() {
         // Sized for eight monitors: more than anyone attaches, and still trivially small.
+        // Eleven bloom steps a window at six levels, each reading one image and writing another.
+        const uint32_t bloomSets = 8 * (2 * kMaxBloomLevels);
+
         const VkDescriptorPoolSize sizes[] = {
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8 * kFramesInFlight},
-            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8},
+            // Two per window for the tonemap (the HDR image and the finished bloom), plus one per
+            // bloom step.
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8 * 2 + bloomSets},
+            // The fragment buffers, one set for the whole renderer, plus one auto-exposure buffer
+            // per window: the first are the world's, the second is a window's.
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 + 8},
+            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, bloomSets},
         };
 
         VkDescriptorPoolCreateInfo dpi{};
         dpi.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpi.maxSets       = 8 * (kFramesInFlight + 1);
-        dpi.poolSizeCount = 2;
+        dpi.maxSets       = 8 * (kFramesInFlight + 1) + 1 + bloomSets;
+        dpi.poolSizeCount = 4;
         dpi.pPoolSizes    = sizes;
         return vkCreateDescriptorPool(ctx_->device(), &dpi, nullptr, &descriptorPool_) == VK_SUCCESS;
     }
@@ -489,28 +765,47 @@ private:
         sci.maxLod       = VK_LOD_CLAMP_NONE;
         if (vkCreateSampler(dev, &sci, nullptr, &sampler_) != VK_SUCCESS) return false;
 
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding         = 0;
-        binding.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        binding.descriptorCount = 1;
-        binding.stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        // One set serves three pipelines: the two exposure compute passes and the tonemap. They
+        // want the same two things — the frame that was just rendered and the exposure state — so
+        // a second layout would be a second copy of the same pair.
+        VkDescriptorSetLayoutBinding bindings[3]{};
+        bindings[0].binding         = 0;
+        bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[0].descriptorCount = 1;
+        bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+
+        bindings[1].binding         = 1;
+        bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[1].descriptorCount = 1;
+        bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // The finished bloom chain (spec 8.1), read only by the tonemap.
+        bindings[2].binding         = 2;
+        bindings[2].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[2].descriptorCount = 1;
+        bindings[2].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo dsl{};
         dsl.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        dsl.bindingCount = 1;
-        dsl.pBindings    = &binding;
+        dsl.bindingCount = 3;
+        dsl.pBindings    = bindings;
         if (vkCreateDescriptorSetLayout(dev, &dsl, nullptr, &tonemapSetLayout_) != VK_SUCCESS) {
             return false;
         }
 
         VkPushConstantRange push{};
-        push.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        push.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
         push.size       = sizeof(TonemapPush);
+
+        // Two sets: its own image and exposure buffer, then the scene, which the blast refraction
+        // of spec 7.2 needs for the camera and the shell. The compute passes bind only set 0 and
+        // are content with a layout that declares more than they use.
+        const VkDescriptorSetLayout sets[2] = {tonemapSetLayout_, sceneSetLayout_};
 
         VkPipelineLayoutCreateInfo pli{};
         pli.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pli.setLayoutCount         = 1;
-        pli.pSetLayouts            = &tonemapSetLayout_;
+        pli.setLayoutCount         = 2;
+        pli.pSetLayouts            = sets;
         pli.pushConstantRangeCount = 1;
         pli.pPushConstantRanges    = &push;
         return vkCreatePipelineLayout(dev, &pli, nullptr, &tonemapPipelineLayout_) == VK_SUCCESS;
@@ -541,6 +836,54 @@ private:
         vkUpdateDescriptorSets(ctx_->device(), 1, &write, 0, nullptr);
     }
 
+    void BindExposureBuffer(VkDescriptorSet set, const Buffer& buffer) {
+        VkDescriptorBufferInfo info{};
+        info.buffer = buffer.handle;
+        info.range  = buffer.size;
+
+        VkWriteDescriptorSet write{};
+        write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet          = set;
+        write.dstBinding      = 1;
+        write.descriptorCount = 1;
+        write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.pBufferInfo     = &info;
+
+        vkUpdateDescriptorSets(ctx_->device(), 1, &write, 0, nullptr);
+    }
+
+    // `sourceLayout` is not always GENERAL: the first downsample reads the HDR attachment, which
+    // the render pass leaves in SHADER_READ_ONLY_OPTIMAL. A descriptor that names the wrong layout
+    // is undefined behaviour rather than an error, which is the kind of bug that works on one
+    // driver and produces a black chain on the next.
+    void BindBloomStep(VkDescriptorSet set, VkImageView source, VkImageLayout sourceLayout,
+                       VkImageView destination) {
+        VkDescriptorImageInfo infos[2]{};
+        infos[0].sampler     = sampler_;
+        infos[0].imageView   = source;
+        infos[0].imageLayout = sourceLayout;
+
+        infos[1].imageView   = destination;
+        infos[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkWriteDescriptorSet writes[2]{};
+        writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet          = set;
+        writes[0].dstBinding      = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[0].pImageInfo      = &infos[0];
+
+        writes[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet          = set;
+        writes[1].dstBinding      = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[1].pImageInfo      = &infos[1];
+
+        vkUpdateDescriptorSets(ctx_->device(), 2, writes, 0, nullptr);
+    }
+
     // The HDR view changes whenever the swapchain is rebuilt. Rebuild waits for the device to go
     // idle first, so rebinding here cannot race an in-flight frame.
     void RefreshTonemapBinding(Attached& w) {
@@ -561,6 +904,36 @@ private:
         write.pImageInfo      = &info;
 
         vkUpdateDescriptorSets(ctx_->device(), 1, &write, 0, nullptr);
+
+        // The finished chain, which the tonemap adds back (spec 8.1). Level 0 is the widest, and
+        // it is where every level above it has already been summed by the time it is read.
+        VkDescriptorImageInfo bloomInfo{};
+        bloomInfo.sampler     = sampler_;
+        bloomInfo.imageView   = w.target->bloomView(0);
+        bloomInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkWriteDescriptorSet bloomWrite{};
+        bloomWrite.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        bloomWrite.dstSet          = w.tonemapSet;
+        bloomWrite.dstBinding      = 2;
+        bloomWrite.descriptorCount = 1;
+        bloomWrite.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bloomWrite.pImageInfo      = &bloomInfo;
+        vkUpdateDescriptorSets(ctx_->device(), 1, &bloomWrite, 0, nullptr);
+
+        // And the chain's own steps, which name the same views.
+        const uint32_t levels = w.target->bloomLevels();
+        for (uint32_t i = 0; i < levels; ++i) {
+            BindBloomStep(w.bloomDown[i], i == 0 ? view : w.target->bloomView(i - 1),
+                          i == 0 ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                 : VK_IMAGE_LAYOUT_GENERAL,
+                          w.target->bloomView(i));
+            if (i > 0) {
+                BindBloomStep(w.bloomUp[i], w.target->bloomView(i), VK_IMAGE_LAYOUT_GENERAL,
+                              w.target->bloomView(i - 1));
+            }
+        }
+
         w.boundHdrView = view;
     }
 
@@ -597,7 +970,56 @@ private:
                                  0.0f},
                       lit ? rise * 2.0f : 0.0f, world_.board.glyphHeight * 1.5f);
 
+        SetBlast(&uniforms, world_.detonation.center, world_.ShellRadius(t));
+        SetFire(&uniforms, world_.FireCenter(t), world_.FireRadius(t), world_.FireColor(t),
+                world_.FlashIntensity(t));
+
         std::memcpy(w.sceneUbo[slot].mapped, &uniforms, sizeof(uniforms));
+    }
+
+    // The three storage buffers, and the two pipeline layouts that reach them. The compute passes
+    // bind them as set 0; the draw already spends set 0 on the scene uniforms and takes them as
+    // set 1, which is why shaders/fragment_common.glsl takes its set index from whoever includes it.
+    bool CreateFragmentLayout() {
+        VkDevice dev = ctx_->device();
+
+        VkDescriptorSetLayoutBinding bindings[3]{};
+        for (uint32_t i = 0; i < 3; ++i) {
+            bindings[i].binding         = i;
+            bindings[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bindings[i].descriptorCount = 1;
+            bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT;
+        }
+
+        VkDescriptorSetLayoutCreateInfo dsl{};
+        dsl.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dsl.bindingCount = 3;
+        dsl.pBindings    = bindings;
+        if (vkCreateDescriptorSetLayout(dev, &dsl, nullptr, &fragmentSetLayout_) != VK_SUCCESS) {
+            return false;
+        }
+
+        VkPushConstantRange push{};
+        push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push.size       = sizeof(FragmentPush);
+
+        VkPipelineLayoutCreateInfo cli{};
+        cli.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        cli.setLayoutCount         = 1;
+        cli.pSetLayouts            = &fragmentSetLayout_;
+        cli.pushConstantRangeCount = 1;
+        cli.pPushConstantRanges    = &push;
+        if (vkCreatePipelineLayout(dev, &cli, nullptr, &fragmentComputeLayout_) != VK_SUCCESS) {
+            return false;
+        }
+
+        const VkDescriptorSetLayout sets[2] = {sceneSetLayout_, fragmentSetLayout_};
+
+        VkPipelineLayoutCreateInfo gli{};
+        gli.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        gli.setLayoutCount = 2;
+        gli.pSetLayouts    = sets;
+        return vkCreatePipelineLayout(dev, &gli, nullptr, &fragmentDrawLayout_) == VK_SUCCESS;
     }
 
     bool CreateBoardLayout() {
@@ -613,6 +1035,57 @@ private:
         pli.pPushConstantRanges    = &push;
 
         return vkCreatePipelineLayout(ctx_->device(), &pli, nullptr, &boardPipelineLayout_) ==
+               VK_SUCCESS;
+    }
+
+    bool CreateBloomLayout() {
+        VkDevice dev = ctx_->device();
+
+        VkDescriptorSetLayoutBinding bindings[2]{};
+        bindings[0].binding         = 0;
+        bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[0].descriptorCount = 1;
+        bindings[0].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        bindings[1].binding         = 1;
+        bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        bindings[1].descriptorCount = 1;
+        bindings[1].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutCreateInfo dsl{};
+        dsl.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dsl.bindingCount = 2;
+        dsl.pBindings    = bindings;
+        if (vkCreateDescriptorSetLayout(dev, &dsl, nullptr, &bloomSetLayout_) != VK_SUCCESS) {
+            return false;
+        }
+
+        VkPushConstantRange push{};
+        push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push.size       = sizeof(BloomPush);
+
+        VkPipelineLayoutCreateInfo pli{};
+        pli.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pli.setLayoutCount         = 1;
+        pli.pSetLayouts            = &bloomSetLayout_;
+        pli.pushConstantRangeCount = 1;
+        pli.pPushConstantRanges    = &push;
+        return vkCreatePipelineLayout(dev, &pli, nullptr, &bloomPipelineLayout_) == VK_SUCCESS;
+    }
+
+    bool CreateMissileLayout() {
+        VkPushConstantRange push{};
+        push.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        push.size       = sizeof(MissilePush);
+
+        VkPipelineLayoutCreateInfo pli{};
+        pli.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pli.setLayoutCount         = 1;
+        pli.pSetLayouts            = &sceneSetLayout_;
+        pli.pushConstantRangeCount = 1;
+        pli.pPushConstantRanges    = &push;
+
+        return vkCreatePipelineLayout(ctx_->device(), &pli, nullptr, &missilePipelineLayout_) ==
                VK_SUCCESS;
     }
 
@@ -696,10 +1169,183 @@ private:
             vkCmdDrawIndexed(frame.cmd, boxIndexCount_, boardBoxCount_, 0, 0, 0);
         }
 
+        if (missileIndexCount_ && world_.MissileVisible(frameTime_)) {
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, missilePipeline_);
+            vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    missilePipelineLayout_, 0, 1, &w.sceneSet[frame.frameSlot], 0,
+                                    nullptr);
+
+            MissilePush       push;
+            const core::Mat4  model = world_.MissileTransform(frameTime_);
+            std::memcpy(push.model, model.m, sizeof(push.model));
+
+            // Spec 5.1 puts the exhaust at 20 to 40 linear. Like the board and the windows, the
+            // shader divides by the base exposure, so this is what the viewer sees.
+            push.exhaust[0] = 30.0f;
+
+            vkCmdPushConstants(frame.cmd, missilePipelineLayout_,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                               sizeof(push), &push);
+
+            DrawMesh(frame.cmd, missileVertices_, missileIndices_, missileIndexCount_);
+        }
+
+        if (fragmentSet_ && fragmentLayout_.total && world_.ShellRadius(frameTime_) > 0.0f) {
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fragmentPipeline_);
+
+            const VkDescriptorSet sets[2] = {w.sceneSet[frame.frameSlot], fragmentSet_};
+            vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fragmentDrawLayout_,
+                                    0, 2, sets, 0, nullptr);
+
+            // Three vertices, one instance a fragment, no vertex buffer bound at all (spec 7.3).
+            vkCmdDraw(frame.cmd, 3, fragmentLayout_.total, 0, 0);
+        }
+
+        // Emissive, after the opaque geometry and in the order spec 8.1 gives: the fireball is
+        // occluded by what is in front of it, the flash is occluded by nothing.
+        if (world_.FireRadius(frameTime_) > 0.0f) {
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fireballPipeline_);
+            vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    scenePipelineLayout_, 0, 1, &w.sceneSet[frame.frameSlot], 0,
+                                    nullptr);
+            vkCmdDraw(frame.cmd, kFireballVertices, 1, 0, 0);
+        }
+
+        if (world_.FlashIntensity(frameTime_) > 0.0f) {
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, flashPipeline_);
+            vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    scenePipelineLayout_, 0, 1, &w.sceneSet[frame.frameSlot], 0,
+                                    nullptr);
+            vkCmdDraw(frame.cmd, 3, 1, 0, 0);
+        }
+
         vkCmdEndRenderPass(frame.cmd);
     }
 
-    void RecordTonemap(const WindowTarget::Frame& frame, Attached& w) {
+    TonemapPush BuildTonemapPush(const Attached& w, float dt) const {
+        const VkExtent2D extent = w.target->extent();
+
+        TonemapPush push;
+        // Base exposure comes from the time of day. Night is not a darker noon, it is a different
+        // exposure, or the city's own windows read as dim rather than as the light. The adaptation
+        // of spec 8.2 moves around this rather than replacing it.
+        push.exposure   = world_.sky.baseExposure;
+        push.ditherAmp  = 1.0f;
+        push.nightShift = world_.sky.bodyIsMoon ? 1.0f : 0.0f;
+        push.delta      = dt;
+        push.width      = static_cast<float>(extent.width);
+        push.height     = static_cast<float>(extent.height);
+
+        // The range the adaptation is allowed to reach. Wide enough that the flash can take the
+        // whole scene down to nothing and the recovery can bring a night desert back, and bounded
+        // so a frame that is entirely fireball or entirely sky cannot run away.
+        push.minExposure = world_.sky.baseExposure * 0.004f;
+        push.maxExposure = world_.sky.baseExposure * 4.0f;
+        push.bloom       = kBloomMix;
+        return push;
+    }
+
+    // The bloom chain (spec 8.1). Runs between the two render passes, on the finished HDR image:
+    // down to the smallest level with a thresholded first step, then back up with a tent filter,
+    // summing as it goes, so level 0 ends up holding the whole chain.
+    void RecordBloom(const WindowTarget::Frame& frame, Attached& w) {
+        const uint32_t levels = w.target->bloomLevels();
+        if (!levels) return;
+
+        // The whole chain is rewritten every frame, so the previous contents are worth nothing and
+        // UNDEFINED is the honest old layout: it lets the driver skip a decompress it would
+        // otherwise have to do to preserve data nothing will read.
+        VkImageMemoryBarrier toGeneral{};
+        toGeneral.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toGeneral.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        toGeneral.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+        toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toGeneral.image               = w.target->bloomImage();
+        toGeneral.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
+        toGeneral.dstAccessMask       = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(frame.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                             &toGeneral);
+
+        const auto dispatch = [&](VkDescriptorSet set, const BloomPush& push, VkExtent2D extent) {
+            vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bloomPipelineLayout_,
+                                    0, 1, &set, 0, nullptr);
+            vkCmdPushConstants(frame.cmd, bloomPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                               sizeof(push), &push);
+            vkCmdDispatch(frame.cmd, (extent.width + 7) / 8, (extent.height + 7) / 8, 1);
+            Barrier(frame.cmd);
+        };
+
+        vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bloomDownPipeline_);
+        for (uint32_t i = 0; i < levels; ++i) {
+            const VkExtent2D extent = w.target->bloomExtent(i);
+
+            BloomPush push;
+            push.destinationWidth  = static_cast<float>(extent.width);
+            push.destinationHeight = static_cast<float>(extent.height);
+            push.threshold         = kBloomThreshold;
+            push.knee              = kBloomKnee;
+            push.firstLevel        = i == 0 ? 1.0f : 0.0f;
+            dispatch(w.bloomDown[i], push, extent);
+        }
+
+        vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bloomUpPipeline_);
+        for (uint32_t i = levels; i-- > 1;) {
+            const VkExtent2D extent = w.target->bloomExtent(i - 1);
+
+            BloomPush push;
+            push.destinationWidth  = static_cast<float>(extent.width);
+            push.destinationHeight = static_cast<float>(extent.height);
+            push.intensity         = kBloomIntensity;
+            dispatch(w.bloomUp[i], push, extent);
+        }
+
+        // The tonemap samples level 0 from the fragment stage.
+        VkMemoryBarrier barrier{};
+        barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(frame.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+                             nullptr);
+    }
+
+    // Auto-exposure (spec 8.2). Runs between the two render passes: the HDR image is complete and
+    // in SHADER_READ_ONLY_OPTIMAL by then, and the tonemap that reads the result has not started.
+    void RecordExposure(const WindowTarget::Frame& frame, Attached& w, float dt) {
+        const VkExtent2D  extent = w.target->extent();
+        const TonemapPush push   = BuildTonemapPush(w, dt);
+
+        vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, tonemapPipelineLayout_,
+                                0, 1, &w.tonemapSet, 0, nullptr);
+        vkCmdPushConstants(frame.cmd, tonemapPipelineLayout_,
+                           VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                           sizeof(push), &push);
+
+        // One invocation per second texel each way, so the group count is over half the extent.
+        const uint32_t groupsX = (extent.width / 2 + 15) / 16;
+        const uint32_t groupsY = (extent.height / 2 + 15) / 16;
+
+        vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, histogramPipeline_);
+        vkCmdDispatch(frame.cmd, groupsX, groupsY, 1);
+
+        Barrier(frame.cmd);
+
+        vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, adaptPipeline_);
+        vkCmdDispatch(frame.cmd, 1, 1, 1);
+
+        // The tonemap reads what the adapt pass just wrote, from the fragment stage.
+        VkMemoryBarrier barrier{};
+        barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(frame.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+                             nullptr);
+    }
+
+    void RecordTonemap(const WindowTarget::Frame& frame, Attached& w, float dt) {
         VkRenderPassBeginInfo bi{};
         bi.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         bi.renderPass        = passes_.present;
@@ -710,18 +1356,59 @@ private:
         SetViewport(frame.cmd, w.target->extent());
 
         vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tonemapPipeline_);
-        vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tonemapPipelineLayout_,
-                                0, 1, &w.tonemapSet, 0, nullptr);
 
-        // Base exposure comes from the time of day. Night is not a darker noon, it is a different
-        // exposure, or the city's own windows read as dim rather than as the light. M5 replaces
-        // the fixed value with the histogram-driven adaptation of spec 8.2.
-        TonemapPush push{world_.sky.baseExposure, 1.0f, world_.sky.bodyIsMoon ? 1.0f : 0.0f};
-        vkCmdPushConstants(frame.cmd, tonemapPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+        const VkDescriptorSet sets[2] = {w.tonemapSet, w.sceneSet[frame.frameSlot]};
+        vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tonemapPipelineLayout_,
+                                0, 2, sets, 0, nullptr);
+
+        const TonemapPush push = BuildTonemapPush(w, dt);
+        vkCmdPushConstants(frame.cmd, tonemapPipelineLayout_,
+                           VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 0,
                            sizeof(push), &push);
 
         vkCmdDraw(frame.cmd, 3, 1, 0, 0);
         vkCmdEndRenderPass(frame.cmd);
+    }
+
+    // Spec 4.1: "State torn down, new seed drawn, empty land again." Everything the world owns on
+    // the device is destroyed and rebuilt, because the sizes change with the seed — a different
+    // city is a different number of buildings and a different number of fragments.
+    //
+    // It costs a stall of a few tens of milliseconds, and it is spent during the black at the end
+    // of phase 10, which is the one moment in the cycle where a dropped frame is invisible.
+    void ResetCycle() {
+        ctx_->WaitIdle();
+
+        vk::DestroyBuffer(*ctx_, &terrainVertices_);
+        vk::DestroyBuffer(*ctx_, &terrainIndices_);
+        vk::DestroyBuffer(*ctx_, &horizonVertices_);
+        vk::DestroyBuffer(*ctx_, &horizonIndices_);
+        vk::DestroyBuffer(*ctx_, &missileVertices_);
+        vk::DestroyBuffer(*ctx_, &missileIndices_);
+        vk::DestroyBuffer(*ctx_, &boxVertices_);
+        vk::DestroyBuffer(*ctx_, &boxIndices_);
+        vk::DestroyBuffer(*ctx_, &buildingInstances_);
+        vk::DestroyBuffer(*ctx_, &boardInstances_);
+        vk::DestroyBuffer(*ctx_, &shatterBoxes_);
+        vk::DestroyBuffer(*ctx_, &fragmentRest_);
+        vk::DestroyBuffer(*ctx_, &fragmentState_);
+
+        terrainIndexCount_ = horizonIndexCount_ = missileIndexCount_ = 0;
+        boxIndexCount_ = buildingCount_ = boardBoxCount_ = 0;
+        fragmentLayout_       = FragmentLayout{};
+        fragmentsInitialised_ = false;
+        // fragmentSet_ is deliberately kept: it is rewritten by UploadFragments below, and the
+        // descriptor pool has no free.
+
+        // Seed 0 means draw one from the clock, which is what makes the next cycle a different
+        // city rather than the same one again (spec 6.4).
+        world_ = world::Generate(settings_, 0);
+
+        // UploadStaticGeometry rebuilds the city and the fragments as well, which is exactly what
+        // is wanted here: everything the world owns on the device, from one call.
+        if (!UploadStaticGeometry()) {
+            app::Log("vulkan: cycle reset failed to rebuild the world");
+        }
     }
 
     bool UploadMesh(const world::Mesh& mesh, Buffer* vertices, Buffer* indices,
@@ -744,15 +1431,19 @@ private:
         if (!UploadMesh(world_.terrainMesh, &terrainVertices_, &terrainIndices_,
                         &terrainIndexCount_) ||
             !UploadMesh(world_.horizonMesh, &horizonVertices_, &horizonIndices_,
-                        &horizonIndexCount_)) {
+                        &horizonIndexCount_) ||
+            !UploadMesh(world_.missileMesh, &missileVertices_, &missileIndices_,
+                        &missileIndexCount_)) {
             app::Log("vulkan: static geometry upload failed");
             return false;
         }
 
         if (!UploadCity()) return false;
+        if (!UploadFragments()) return false;
 
-        app::Log("vulkan: uploaded %u terrain indices, %u horizon indices, %u buildings",
-                 terrainIndexCount_, horizonIndexCount_, buildingCount_);
+        app::Log("vulkan: uploaded %u terrain indices, %u horizon indices, %u missile indices, "
+                 "%u buildings",
+                 terrainIndexCount_, horizonIndexCount_, missileIndexCount_, buildingCount_);
         return true;
     }
 
@@ -792,6 +1483,142 @@ private:
         }
 
         return true;
+    }
+
+    // Allocates the fragment buffers and uploads the one thing the CPU knows about them: the box
+    // list. Nine megabytes of triangles are produced on the device by fragment_init.comp on the
+    // first frame and never travel over the bus (spec 7.3).
+    bool UploadFragments() {
+        std::vector<ShatterBox> boxes;
+        PackShatterBoxes(world_.city, world_.board, FragmentQuality(), &boxes, &fragmentLayout_);
+        if (boxes.empty()) return true;
+
+        const uint32_t count = fragmentLayout_.total;
+
+        const VkBufferUsageFlags storage =
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+        if (!vk::CreateBufferWithData(*ctx_, boxes.data(), boxes.size() * sizeof(ShatterBox),
+                                      storage, &shatterBoxes_) ||
+            !vk::CreateBuffer(*ctx_, VkDeviceSize(count) * 64, storage, vk::BufferUse::GpuOnly,
+                              &fragmentRest_) ||
+            !vk::CreateBuffer(*ctx_, VkDeviceSize(count) * 64, storage, vk::BufferUse::GpuOnly,
+                              &fragmentState_)) {
+            app::Log("vulkan: fragment buffers failed");
+            return false;
+        }
+
+        // Allocated once and rewritten on every cycle reset. Allocating a fresh one per cycle
+        // would drain the pool after a handful of them, and the symptom would be a screen saver
+        // that worked perfectly for ten minutes and then stopped drawing fragments.
+        if (!fragmentSet_ && !AllocateSet(fragmentSetLayout_, &fragmentSet_)) return false;
+
+        const Buffer* buffers[3] = {&shatterBoxes_, &fragmentRest_, &fragmentState_};
+
+        VkDescriptorBufferInfo infos[3]{};
+        VkWriteDescriptorSet   writes[3]{};
+        for (uint32_t i = 0; i < 3; ++i) {
+            infos[i].buffer = buffers[i]->handle;
+            infos[i].range  = buffers[i]->size;
+
+            writes[i].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet          = fragmentSet_;
+            writes[i].dstBinding      = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].pBufferInfo     = &infos[i];
+        }
+        vkUpdateDescriptorSets(ctx_->device(), 3, writes, 0, nullptr);
+
+        app::Log("vulkan: %u fragments from %u boxes, %.1f MB",
+                 count, fragmentLayout_.boxes, double(count) * 128.0 / (1024.0 * 1024.0));
+        return true;
+    }
+
+    // Spec 11.2's first quality lever. M6 turns it into the auto-quality controller; until then it
+    // is fixed, with an override so a run can be measured at a level it would not choose.
+    static int FragmentQuality() {
+        const char* env = std::getenv("NUKE_SAVER_QUALITY");
+        if (env && env[0] >= '0' && env[0] <= '3') return env[0] - '0';
+        return 1;  // 200 triangles a building
+    }
+
+    // Fills the push block from the world and the clock. Everything in it is a pure function of
+    // the two, which is what keeps the simulation reproducible from a seed (spec 4.2).
+    FragmentPush BuildFragmentPush(float t, float dt) const {
+        const world::Detonation& det = world_.detonation;
+
+        FragmentPush push;
+        push.counts[0] = fragmentLayout_.boxes;
+        push.counts[1] = fragmentLayout_.total;
+
+        push.blast[0] = det.center.x;
+        push.blast[1] = det.center.y;
+        push.blast[2] = det.center.z;
+        push.blast[3] = world_.ShellRadius(t);
+
+        push.timing[0] = t;
+        push.timing[1] = dt;
+        push.timing[2] = world_.timeline.Start(world::Phase::Gather);
+        push.timing[3] = world_.timeline.End(world::Phase::Gather);
+
+        push.release[0] = world_.timeline.Start(world::Phase::Disperse);
+        push.release[1] = world_.timeline.End(world::Phase::Disperse);
+        push.release[2] = world_.CloudGrow(t);
+        push.release[3] = world_.cityRadius;
+
+        push.wind[0] = det.wind.x;
+        push.wind[1] = det.wind.y;
+        push.wind[2] = det.wind.z;
+        push.wind[3] = det.gravity;
+
+        push.cloud[0] = det.stemHeight;
+        push.cloud[1] = det.capHeight;
+        push.cloud[2] = det.capRadius;
+        push.cloud[3] = det.capTube;
+        return push;
+    }
+
+    // One dispatch a frame, recorded into the first window's command buffer before its render
+    // pass. The simulation is the world's, so a second monitor draws what the first one stepped
+    // rather than stepping it again.
+    void RecordFragmentSim(VkCommandBuffer cmd, float t, float dt) {
+        const uint32_t count = fragmentLayout_.total;
+        if (!count || !fragmentSet_) return;
+
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fragmentComputeLayout_, 0, 1,
+                                &fragmentSet_, 0, nullptr);
+
+        const FragmentPush push = BuildFragmentPush(t, dt);
+        vkCmdPushConstants(cmd, fragmentComputeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                           sizeof(push), &push);
+
+        const uint32_t groups = (count + 63) / 64;
+
+        if (!fragmentsInitialised_) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fragmentInitPipeline_);
+            vkCmdDispatch(cmd, groups, 1, 1);
+            Barrier(cmd);
+            fragmentsInitialised_ = true;
+        }
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fragmentSimPipeline_);
+        vkCmdDispatch(cmd, groups, 1, 1);
+        Barrier(cmd);
+    }
+
+    // Compute writes, then the vertex stage reads. Without this the first frames of the blast draw
+    // whatever the previous dispatch had got to, which on a tile-based part is anything at all.
+    static void Barrier(VkCommandBuffer cmd) {
+        VkMemoryBarrier barrier{};
+        barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                             0, 1, &barrier, 0, nullptr, 0, nullptr);
     }
 
     void DrawMesh(VkCommandBuffer cmd, const Buffer& vertices, const Buffer& indices,
@@ -875,7 +1702,13 @@ private:
     }
 
     std::unique_ptr<Context> ctx_;
+    app::Settings            settings_{};
     world::World             world_;
+
+    // Where the current cycle began on the host's clock (spec 4.1). The host hands out seconds
+    // since the screen saver started; a cycle is what the world is a function of, and there are
+    // many cycles in a run.
+    double cycleBase_ = 0.0;
     app::CaptureRequest      capture_ = app::CaptureRequestFromEnvironment();
     Buffer                   captureBuffer_{};
     int                      frameCounter_ = 0;
@@ -905,6 +1738,30 @@ private:
     Buffer   boardInstances_{};
     uint32_t boardBoxCount_ = 0;
 
+    // The missile, the fireball and the flash (spec 7.1, 7.2). The fireball and the flash have no
+    // geometry at all: one builds its sphere from gl_VertexIndex, the other is a fullscreen
+    // triangle, so both are a pipeline and nothing else.
+    VkPipelineLayout missilePipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline       missilePipeline_       = VK_NULL_HANDLE;
+    VkPipeline       fireballPipeline_      = VK_NULL_HANDLE;
+    VkPipeline       flashPipeline_         = VK_NULL_HANDLE;
+    Buffer           missileVertices_{}, missileIndices_{};
+    uint32_t         missileIndexCount_ = 0;
+
+    // The fragment system (spec 7.3). One descriptor set for the whole renderer, because the
+    // simulation belongs to the world rather than to a window.
+    VkDescriptorSetLayout fragmentSetLayout_    = VK_NULL_HANDLE;
+    VkPipelineLayout      fragmentComputeLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout      fragmentDrawLayout_   = VK_NULL_HANDLE;
+    VkPipeline            fragmentInitPipeline_ = VK_NULL_HANDLE;
+    VkPipeline            fragmentSimPipeline_  = VK_NULL_HANDLE;
+    VkPipeline            fragmentPipeline_     = VK_NULL_HANDLE;
+    VkDescriptorSet       fragmentSet_          = VK_NULL_HANDLE;
+
+    Buffer         shatterBoxes_{}, fragmentRest_{}, fragmentState_{};
+    FragmentLayout fragmentLayout_{};
+    bool           fragmentsInitialised_ = false;
+
     // The cycle time the frame being recorded belongs to. Stored rather than threaded through
     // RecordScene, so the board's digits and the scene uniforms cannot disagree about what time
     // it is — which for a countdown is the whole point.
@@ -914,6 +1771,15 @@ private:
     VkDescriptorSetLayout tonemapSetLayout_      = VK_NULL_HANDLE;
     VkPipelineLayout      tonemapPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline            tonemapPipeline_       = VK_NULL_HANDLE;
+    VkPipeline            histogramPipeline_     = VK_NULL_HANDLE;
+    VkPipeline            adaptPipeline_         = VK_NULL_HANDLE;
+
+    // The bloom chain (spec 8.1). One set per level per direction, allocated with the window
+    // because the number of levels follows the monitor's size.
+    VkDescriptorSetLayout bloomSetLayout_     = VK_NULL_HANDLE;
+    VkPipelineLayout      bloomPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline            bloomDownPipeline_  = VK_NULL_HANDLE;
+    VkPipeline            bloomUpPipeline_    = VK_NULL_HANDLE;
 };
 
 // Validation is expensive and noisy, and a screen saver has no business loading a layer on a
@@ -926,7 +1792,8 @@ std::unique_ptr<Renderer> CreateVulkanRenderer(const app::Settings& settings) {
     auto ctx = Context::Create(WantValidation());
     if (!ctx) return nullptr;
 
-    auto renderer = std::make_unique<VulkanRenderer>(std::move(ctx), world::Generate(settings));
+    auto renderer =
+        std::make_unique<VulkanRenderer>(std::move(ctx), settings, world::Generate(settings));
     if (!renderer->Init()) {
         app::Log("vulkan: renderer init failed, falling back");
         return nullptr;

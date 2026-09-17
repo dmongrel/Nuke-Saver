@@ -5,6 +5,7 @@
 #include "core/rng.h"
 
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 
 #include <windows.h>
@@ -137,7 +138,10 @@ World Generate(const app::Settings& settings, uint64_t seed) {
         world.cityRadius = world.city.params.radius;
     }
 
-    world.board = GenerateBoard(world.seed, world.city);
+    world.board      = GenerateBoard(world.seed, world.city);
+    world.detonation = Detonation::Create(world.seed, world.cityRadius, world.city.tallest);
+    world.missileMesh =
+        BuildMissileMesh(world.seed, world.detonation.missileLength, world.detonation.missileRadius);
 
     world.terrain.seed       = world.seed;
     world.terrain.cityRadius = world.cityRadius;
@@ -145,18 +149,53 @@ World Generate(const app::Settings& settings, uint64_t seed) {
 
     world.camera = OrbitCamera::Create(world.seed, shot, world.cityRadius, world.cycleSeconds);
 
-    // Spec 11.1's framing solver, with the one subject that exists at this milestone. The cloud
-    // of phase 8 is the binding constraint and arrives with M4; until it does, framing on the
-    // city is the same solve with one fewer thing to satisfy.
+    // Spec 11.1's framing solver. Four of its five constraints exist now, and they do not apply
+    // at the same time: the city must fit while it is being built, the missile must be in frame
+    // for the last two seconds of its run (spec 7.1), the cloud must fit at its widest in phase 8,
+    // and the debris field must fit in phase 10. The cloud binds the orbit radius, as spec 11.1
+    // says it must.
     {
         Subject city;
         city.radius = world.cityRadius;
         city.height = world.city.tallest;
 
-        world.camera.FrameOn(city);
-        app::Log("camera: framed on city r=%.0fm h=%.0fm -> orbit %.0fm, fill %.2f at t=0",
-                 city.radius, city.height, world.camera.orbitRadius(),
-                 world.camera.FramingFill(city, 0.0f));
+        Subject cloud;
+        cloud.radius = world.detonation.capRadius + world.detonation.capTube;
+        cloud.height = world.detonation.capHeight + world.detonation.capTube;
+
+        // Phase 7 throws the city well outside its own footprint, and what is left lies flat.
+        Subject debris;
+        debris.radius = world.cityRadius * 1.35f;
+        debris.height = 40.0f;
+
+        // Spec 7.1 makes this a framing requirement rather than a hope: the missile MUST be on
+        // screen for the last two seconds of its run. Sized from where it actually is when those
+        // two seconds begin, so the constraint is the real one and not a guess at a bearing.
+        const float missileVisibleFrom = world.timeline.End(Phase::Missile) - 2.0f;
+        const core::Vec3 missileAt =
+            world.detonation.MissileAt(world.timeline, missileVisibleFrom);
+        Subject missile;
+        missile.radius = std::sqrt(missileAt.x * missileAt.x + missileAt.z * missileAt.z);
+        missile.height = missileAt.y;
+
+        const FramingWindow windows[4] = {
+            {city, world.timeline.Start(Phase::Growth), world.timeline.End(Phase::Settle)},
+            {missile, missileVisibleFrom, world.timeline.End(Phase::Missile)},
+            {cloud, world.timeline.Start(Phase::Gather), world.timeline.End(Phase::Disperse)},
+            {debris, world.timeline.Start(Phase::Fade), world.timeline.End(Phase::Fade)},
+        };
+
+        // And the look-at rises across the cycle from the skyline to the middle of the cloud.
+        // Spec 11.1 asks for the look-at to vary slowly over the cycle; this is that variation
+        // aimed at something, rather than at a fraction of the city's radius chosen blind.
+        world.camera.SetTargetHeights(world.city.tallest * 0.55f, world.detonation.capHeight * 0.5f);
+
+        world.camera.FrameOn(windows, 4);
+        app::Log("camera: orbit %.0fm, fill %.2f city / %.2f missile / %.2f cloud / %.2f debris",
+                 world.camera.orbitRadius(), world.camera.FramingFill(city, 0.0f),
+                 world.camera.FramingFill(missile, missileVisibleFrom),
+                 world.camera.FramingFill(cloud, world.timeline.Start(Phase::Disperse)),
+                 world.camera.FramingFill(debris, world.timeline.Start(Phase::Fade)));
     }
 
     // The range is sized against the shot that actually happens. A peak shorter than the camera
@@ -179,6 +218,11 @@ World Generate(const app::Settings& settings, uint64_t seed) {
              ShotName(shot), world.cityRadius, world.camera.revolutionSeconds());
     app::Log("world: city %zu buildings, tallest %.0fm, grown by %.1fs",
              world.city.buildings.size(), world.city.tallest, world.city.growthEnds);
+    app::Log("detonation: shell reaches %.0fm, cloud stem %.0fm cap %.0fm r%.0fm, wind %.0fm/s",
+             world.detonation.reach, world.detonation.stemHeight, world.detonation.capHeight,
+             world.detonation.capRadius,
+             std::sqrt(world.detonation.wind.x * world.detonation.wind.x +
+                       world.detonation.wind.z * world.detonation.wind.z));
     app::Log("world: terrain %zu verts / %zu tris, horizon %zu peaks %.0f-%.0fm, margin %.2f deg",
              world.terrainMesh.vertices.size(), world.terrainMesh.indices.size() / 3, peaks.size(),
              world.horizon.minHeight, world.horizon.maxHeight, worst / core::kDegToRad);

@@ -27,7 +27,13 @@ void main() {
     // The whole board rises as one object, scaling about the ground plane — not each box about its
     // own base, which would leave a segment bar hanging at its final height and merely shrink.
     float rise = clamp(pc.rise, 0.0, 1.0);
-    if (rise <= 0.0) {
+
+    // Spec 7.3: the board fragments on the same rule as the buildings, box by box, measured the
+    // same way shaders/fragment_sim.comp measures it.
+    vec3 middle = vec3(inBaseYaw.x, inBaseYaw.y + inSizeId.y * 0.5, inBaseYaw.z);
+    bool shattered = scene.blast.w > 0.0 && length(middle - scene.blast.xyz) <= scene.blast.w;
+
+    if (rise <= 0.0 || shattered) {
         gl_Position = vec4(0.0, 0.0, -1.0, 1.0);  // outside the clip volume
         vWorldPos   = vec3(0.0);
         vNormal     = vec3(0.0, 1.0, 0.0);

@@ -109,9 +109,13 @@ Timeline Timeline::Create(uint64_t seed) {
 
     line.total_ = cursor;
 
-    app::Log("timeline: %.1fs total, growth %.1f-%.1f, countdown %.1f, impact %.1f, gather %.1f",
-             line.total_, line.Start(Phase::Growth), line.End(Phase::Growth),
-             line.Start(Phase::Countdown), line.Start(Phase::Flash), line.Start(Phase::Gather));
+    // Every boundary, not a selection of them. Half the questions asked of this file so far have
+    // been "which phase was t in", and a summary that names five of eleven cannot answer them.
+    app::Log("timeline: %.1fs total", line.total_);
+    for (int i = 0; i < kPhaseCount; ++i) {
+        const Phase p = static_cast<Phase>(i);
+        app::Log("  phase %d %-10s %6.1f - %6.1f", i, PhaseName(p), line.Start(p), line.End(p));
+    }
 
     return line;
 }

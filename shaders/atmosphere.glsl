@@ -12,13 +12,8 @@
 #ifndef NUKE_SAVER_ATMOSPHERE_GLSL
 #define NUKE_SAVER_ATMOSPHERE_GLSL
 
+#include "noise.glsl"
 #include "scene.glsl"
-
-float Hash13(vec3 p) {
-    p = fract(p * 0.1031);
-    p += dot(p, p.zyx + 31.32);
-    return fract((p.x + p.y) * p.z);
-}
 
 // Gradient plus horizon glow, with no stars and no celestial body. This is what distance fades
 // into, so it must be the smooth part only: a mountain fading into a star would be a defect, and

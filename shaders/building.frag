@@ -8,6 +8,7 @@
 // the large one rather than as a smaller building.
 
 #include "atmosphere.glsl"
+#include "fire.glsl"
 
 layout(location = 0) in vec3  vWorldPos;
 layout(location = 1) in vec3  vNormal;
@@ -121,6 +122,10 @@ void main() {
                                  max(scene.boardColor.w * scene.boardColor.w, 1.0));
     shaded += albedo * scene.boardColor.rgb *
               max(dot(normal, toBoard / max(boardDist, 1e-3)), 0.0) * falloff;
+
+    // The fireball (spec 8.2). A building still standing while the shell crosses the city is
+    // lit far more by this than by the sky it was lit by a second earlier.
+    shaded += FireContribution(albedo, vWorldPos, normal);
 
     // Emission. A window's lamp does not get brighter after dark — what changes is everything
     // around it — so the radiance here is held constant in *display* terms by dividing out the

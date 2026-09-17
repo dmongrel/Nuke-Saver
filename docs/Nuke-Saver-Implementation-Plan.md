@@ -29,8 +29,13 @@ Revisions:
 |---|---|---|---|
 | M0 Toolchain | done | `6a111e6` | A1 clean build, zero warnings; selftest probe reaches `complete` |
 | M1 Host and fallback | done | `7fef5a6` | 48 selftest checks; A8, A9, A12 direct; A2/A3/A4 deferred, see below |
-| M2 Vulkan core | done | this commit | Live run, validation clean over 600+ frames; A9 re-checked against a real device |
-| M3 World and growth | next | | |
+| M2 Vulkan core | done | `8751d81` | Live run, validation clean over 600+ frames; A9 re-checked against a real device |
+| M3a Sky, terrain, horizon | done | `9a0e12a` | Captured frames at four times of day; horizon closure checked per seed |
+| M3b City and framing | done | `29bdcd1` | 500 buildings at every seed; the framing solver proved able to fail |
+| M3c Cycle and board | done | `09e36b3` | 277 checks; the board captured at three times of day |
+| M4 Fragments | done | this commit | 296 checks; captured through blast, scatter, gather, cloud and disperse; A11 soak clean over 30 minutes |
+| M5a Missile, flash, fireball, exposure | this commit | | 322 checks; the cycle now resets and repeats with a new seed |
+| M5b Bloom | next | | |
 
 ### Deferred verification
 
@@ -44,7 +49,10 @@ each one names what would settle it.
   `InputWatcher::Consider` is pure, and the grace period, dead zone and key-edge cases are
   covered by selftest. Re-run the live checks from an interactive session.
 - **A11 soak.** Run at M2 only as a 600-frame check with validation on, not the full duration.
-  The plan already schedules it properly at M4 and M6, which is where a GPU leak would show.
+  Run properly at M4: 180,000 frames, 30 minutes, working set and handle count sampled every 30
+  seconds. Flat throughout — 116.3 MB working set, 306.2 MB private, 531 handles, 408.3 MB of GPU
+  memory, none of them moving, and the process reached its own end frame rather than being killed.
+  It runs again at M6.
 
 ### Open question raised during M1
 

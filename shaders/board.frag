@@ -7,6 +7,7 @@
 // difference between a numeral and a shape.
 
 #include "atmosphere.glsl"
+#include "fire.glsl"
 
 layout(location = 0) in vec3  vWorldPos;
 layout(location = 1) in vec3  vNormal;
@@ -44,6 +45,8 @@ void main() {
     vec3 skyAmbient = max(scene.ambientColor.rgb,
                           mix(scene.horizonColor.rgb, scene.zenithColor.rgb, 0.7));
     shaded += albedo * skyAmbient * scene.groundColor.w * (0.5 + 0.5 * normal.y);
+
+    shaded += FireContribution(albedo, vWorldPos, normal);
 
     // A lit segment. Amber, and emissive far above 1 so the bloom of M5 finds it (spec 5.1).
     // Divided by the base exposure for the same reason the windows are: the lamp does not change

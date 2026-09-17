@@ -9,8 +9,9 @@
 layout(set = 0, binding = 0) uniform sampler2D uHdr;
 
 layout(push_constant) uniform Push {
-    float exposure;   // linear multiplier applied before the curve
-    float ditherAmp;  // in output LSBs; 1.0 is the usual choice for 8-bit
+    float exposure;    // linear multiplier applied before the curve
+    float ditherAmp;   // in output LSBs; 1.0 is the usual choice for 8-bit
+    float nightShift;  // 0 by day, 1 when the moon is the key light
 } pc;
 
 layout(location = 0) in  vec2 vUV;
@@ -41,9 +42,26 @@ float Dither(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
+// The Purkinje shift. Below roughly the luminance of a moonlit surface the cones stop
+// contributing and vision goes rod-only: colour drains away and what is left reads blue.
+//
+// Without it a night scene is a day scene with the gain turned down, which is exactly what this
+// looked like — moonlight on desert sand is warm in physical terms, so the whole basin came out a
+// mid brown that no amount of dimming turns into night. The shift is keyed on luminance rather
+// than applied flat, so the city's own windows and, later, the fireball keep their colour: they
+// are well above the threshold, which is the point.
+vec3 Scotopic(vec3 color, float amount) {
+    if (amount <= 0.0) return color;
+
+    float lum  = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    float rods = amount * (1.0 - smoothstep(0.004, 0.10, lum));
+
+    return mix(color, vec3(lum) * vec3(0.72, 0.90, 1.34), rods);
+}
+
 void main() {
     vec3 hdr = texture(uHdr, vUV).rgb * pc.exposure;
-    vec3 sdr = LinearToSrgb(ACESFilm(hdr));
+    vec3 sdr = LinearToSrgb(ACESFilm(Scotopic(hdr, pc.nightShift)));
 
     // Dither in display space, centred on zero, scaled to the output quantum.
     sdr += (Dither(gl_FragCoord.xy) - 0.5) * (pc.ditherAmp / 255.0);

@@ -2,6 +2,8 @@
 
 #include "core/rng.h"
 
+#include <initializer_list>
+
 namespace world {
 
 using core::Lerp;
@@ -96,6 +98,114 @@ OrbitCamera OrbitCamera::Create(uint64_t seed, ShotType shot, float cityRadius,
     cam.driftPhase_     = rng.Range(0.0f, core::kTwoPi);
 
     return cam;
+}
+
+float OrbitCamera::FramingFill(const Subject& subject, float t, float aspect) const {
+    const CameraState state = Evaluate(t);
+
+    const Vec3 forward = core::Normalize(state.target - state.eye);
+
+    // A view basis. Degenerate only if the camera looks straight up or down, which no shot does.
+    Vec3 right = core::Cross(forward, state.up);
+    if (core::Length(right) < 1e-4f) return 1e6f;
+    right          = core::Normalize(right);
+    const Vec3 realUp = core::Cross(right, forward);
+
+    const float halfV = state.fovY * 0.5f;
+    const float halfH = std::atan(std::tan(halfV) * (aspect > 0.0f ? aspect : 1.0f));
+
+    // The silhouette of an upright cylinder is bounded by its two rims, so sampling the rims is
+    // enough — no point on the surface projects outside the hull of those samples.
+    constexpr int kSamples = 32;
+
+    float worst = 0.0f;
+    for (int i = 0; i < kSamples; ++i) {
+        const float a  = core::kTwoPi * static_cast<float>(i) / static_cast<float>(kSamples);
+        const float cx = std::cos(a) * subject.radius;
+        const float cz = std::sin(a) * subject.radius;
+
+        for (float y : {0.0f, subject.height}) {
+            const Vec3 p{cx, y, cz};
+            const Vec3 d = p - state.eye;
+
+            const float dz = core::Dot(d, forward);
+
+            // Behind the camera, or level with it. Either way the subject is not in front of the
+            // lens and no scale of this shot frames it.
+            if (dz <= 1.0f) return 1e6f;
+
+            const float h = std::fabs(std::atan(core::Dot(d, right) / dz)) / halfH;
+            const float v = std::fabs(std::atan(core::Dot(d, realUp) / dz)) / halfV;
+
+            worst = std::fmax(worst, std::fmax(h, v));
+        }
+    }
+
+    return worst;
+}
+
+void OrbitCamera::FrameOn(const Subject& subject, float aspect, float holdFraction, float margin) {
+    if (subject.radius <= 0.0f) return;
+
+    const float limit = 1.0f - core::Clamp(margin, 0.0f, 0.6f);
+
+    const float radiusStart = radiusStart_;
+    const float radiusEnd   = radiusEnd_;
+    const float heightStart = heightStart_;
+    const float heightEnd   = heightEnd_;
+
+    const auto applyScale = [&](float k) {
+        radiusStart_ = radiusStart * k;
+        radiusEnd_   = radiusEnd * k;
+
+        // Height scales with radius so the shot keeps its angle onto the city — scale only the
+        // radius and a high oblique becomes a plan view and a street-level shot becomes a crane.
+        // Floored, because a camera below eye height is not a camera angle, it is a bug.
+        heightStart_ = std::fmax(heightStart * k, 6.0f);
+        heightEnd_   = std::fmax(heightEnd * k, 6.0f);
+
+        radiusMid_ = (radiusStart_ + radiusEnd_) * 0.5f;
+    };
+
+    const auto fits = [&](float k) {
+        applyScale(k);
+
+        // The subject has to be framed through the opening stretch, and has to stay in front of
+        // the camera for the whole cycle — the orbit creeps inward, and a shot that frames the
+        // city at t=0 can still fly into it at t=0.8.
+        for (int i = 0; i <= 48; ++i) {
+            const float t    = cycleSeconds_ * static_cast<float>(i) / 48.0f;
+            const float fill = FramingFill(subject, t, aspect);
+            if (fill > 1e5f) return false;
+            if (t <= cycleSeconds_ * holdFraction && fill > limit) return false;
+        }
+        return true;
+    };
+
+    // Monotone in k: pulling the camera out can only shrink what it sees and can only move it
+    // further from the centre, so a bisection is exact rather than a search over a bumpy space.
+    // The upper bound has to cover the largest subject this will ever be asked to frame, which is
+    // the phase 8 cloud and not the city — at 8 the search gave up on anything a few kilometres
+    // across and silently returned the shot unchanged, which is a framing solver that does
+    // nothing on exactly the case spec 11.1 calls the binding constraint.
+    float lo = 0.08f, hi = 0.08f;
+    while (hi < 64.0f && !fits(hi)) hi *= 1.25f;
+
+    if (!fits(hi)) {
+        // Nothing in the range worked. Leave the shot as it was drawn rather than committing to
+        // an arbitrary scale: a shot that ignores the solver is recoverable, a shot inside the
+        // city is not.
+        applyScale(1.0f);
+        return;
+    }
+
+    for (int i = 0; i < 28; ++i) {
+        const float mid = (lo + hi) * 0.5f;
+        if (fits(mid)) hi = mid;
+        else lo = mid;
+    }
+
+    applyScale(hi);
 }
 
 CameraState OrbitCamera::Evaluate(float t) const {

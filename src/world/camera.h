@@ -38,6 +38,21 @@ struct CameraState {
     }
 };
 
+// What the framing solver has to keep in frame: an upright cylinder on the city axis, from the
+// ground to `height`.
+//
+// A cylinder rather than a sphere, because everything this has to frame over a cycle is much
+// wider than it is tall — a disc of boxes 1.5 km across and 180 m high in phase 1, a debris field
+// in phase 10 — and a sphere around a shape like that is nearly all empty air. Framed as a sphere,
+// the city was pushed back until a 730 m ball fitted the frame and then occupied a quarter of it.
+//
+// The mushroom cloud of phase 8 is the one subject that is taller than it is wide, and a cylinder
+// describes that correctly too. It is the binding constraint on the orbit once M4 exists.
+struct Subject {
+    float radius = 0.0f;  // horizontal, metres
+    float height = 0.0f;  // top above the ground
+};
+
 class OrbitCamera {
 public:
     // `cityRadius` is the radius of the city footprint in metres, `cycleSeconds` the full run
@@ -48,8 +63,29 @@ public:
     // continues, so a cycle that overruns drifts rather than snapping.
     CameraState Evaluate(float t) const;
 
+    // The framing solver of spec 11.1, with the constraints that exist so far.
+    //
+    // Scales the whole shot — radius and height together, so its character survives — until
+    // `subject` sits inside the frame with `margin` to spare, for every t in [0, holdFraction] of
+    // the cycle, and until the camera is outside the subject sphere for the *whole* cycle. The
+    // smallest scale that satisfies both is chosen, because the failure worth avoiding here is a
+    // city too small to see, not one too large.
+    //
+    // `aspect` defaults to 16:9, the narrowest screen this is expected to run on. Solving there
+    // is conservative for 21:9, which only ever has more horizontal room — which is what spec
+    // 11.1 means by working at both without a cut or a zoom. The world is generated once and
+    // presented on every monitor, so this cannot be the actual window's aspect.
+    void FrameOn(const Subject& subject, float aspect = 16.0f / 9.0f, float holdFraction = 0.30f,
+                 float margin = 0.10f);
+
     ShotType shot() const { return shot_; }
     float    orbitRadius() const { return radiusMid_; }
+
+    // How much of the frame the subject fills at `t`, as a fraction of the distance from the
+    // centre to the edge, taking the worse of the two axes. 1 means it exactly touches an edge;
+    // above 1 it is being cropped. Exposed so the selftest can assert the solver's result rather
+    // than re-deriving it, and so the caller can log what it got.
+    float FramingFill(const Subject& subject, float t, float aspect = 16.0f / 9.0f) const;
 
     // Seconds for a full revolution. Spec 11.1 asks for 4 to 8 minutes, so one 80 to 115 second
     // cycle sweeps 30 to 90 degrees of arc rather than a full turn.

@@ -173,6 +173,9 @@ void TestSky();
 void TestCamera();
 void TestTerrain();
 void TestHorizon();
+void TestCity();
+void TestUnitCube();
+void TestFraming();
 }  // namespace selftest
 
 int main() {
@@ -187,6 +190,9 @@ int main() {
     selftest::TestCamera();
     selftest::TestTerrain();
     selftest::TestHorizon();
+    selftest::TestCity();
+    selftest::TestUnitCube();
+    selftest::TestFraming();
     TestArgs();
     TestInputWatcher();
     TestSettings();

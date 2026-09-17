@@ -11,6 +11,7 @@
 #define NUKE_SAVER_WORLD_WORLD_H
 
 #include "world/camera.h"
+#include "world/city.h"
 #include "world/horizon.h"
 #include "world/mesh.h"
 #include "world/sky.h"
@@ -36,8 +37,9 @@ struct World {
     OrbitCamera camera;
 
     // Radius of the city footprint in metres. Spec 6.4 puts the extent at 1.2 to 2 km across.
-    // The generator in M3b will set this from the lot layout; until then it is drawn directly,
-    // because the camera has to be sized against something and the range is what matters.
+    // Drawn before the layout, because the camera and the horizon range are both sized against
+    // it; the generator then reports the extent its lots actually reached, and this is updated to
+    // that, so the framing of spec 11.1 sees the city that exists rather than the one asked for.
     float cityRadius = 800.0f;
 
     float cycleSeconds = kNominalCycleSeconds;
@@ -49,6 +51,9 @@ struct World {
     // world is the source of truth for shape, the GPU buffers are a copy.
     Mesh terrainMesh;
     Mesh horizonMesh;
+
+    // Instances, not geometry: every building is the same unit cube (spec 6.4).
+    City city;
 
     CameraState CameraAt(float t) const { return camera.Evaluate(t); }
 };

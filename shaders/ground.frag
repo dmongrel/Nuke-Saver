@@ -59,10 +59,21 @@ void main() {
 
     vec3 lit = albedo * scene.keyColor.rgb * lambert * keyAbove;
 
-    // Ambient stands in for the sky as an area source until M5 needs better. Weighted upward,
-    // because the sky is above and the ground is not.
+    // The sky this surface actually sits under, not a single authored constant. At twilight the
+    // ambient colour of spec 5.4 is the violet overhead, which ignores the orange band filling
+    // half the hemisphere and left the desert floor as a void with a lit city floating on it.
+    // Taking the greater of the two keeps night — where the authored value is deliberately above
+    // the almost-black gradient — from going darker still.
+    //
+    // Weighted toward the zenith because irradiance on a level surface weights by the cosine, and
+    // the horizon band arrives at a grazing angle. A twilight foreground is meant to be dark; it
+    // is not meant to be nothing.
+    vec3 skyAmbient = max(scene.ambientColor.rgb,
+                          mix(scene.horizonColor.rgb, scene.zenithColor.rgb, 0.7));
+
+    // Weighted upward, because the sky is above and the ground is not.
     float skyFacing = 0.5 + 0.5 * normal.y;
-    lit += albedo * scene.ambientColor.rgb * scene.groundColor.w * skyFacing;
+    lit += albedo * skyAmbient * scene.groundColor.w * skyFacing;
 
     // Haze, into exactly the sky that is behind this surface (spec 6.3). Using the view ray's own
     // gradient value rather than a single fog colour is what lets the range dissolve into the sky

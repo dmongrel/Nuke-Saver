@@ -14,6 +14,7 @@
 #include "app/capture.h"
 #include "app/log.h"
 #include "app/settings.h"
+#include "render/building_data.h"
 #include "render/scene_uniforms.h"
 #include "render/shaders_embedded.h"
 #include "render/vk/buffer.h"
@@ -37,6 +38,7 @@ using vk::WindowTarget;
 struct TonemapPush {
     float exposure;
     float ditherAmp;
+    float nightShift;
 };
 
 VkShaderModule LoadShader(VkDevice device, const char* name) {
@@ -69,11 +71,12 @@ struct PipelineDesc {
     VkPipelineLayout layout     = VK_NULL_HANDLE;
     bool             depthTest  = false;
     bool             depthWrite = false;
-    // Fullscreen passes build their own vertices from gl_VertexIndex; world geometry comes from a
-    // buffer. That is the only vertex layout in the project, so it is a flag rather than a
-    // description nobody would ever vary.
-    bool             worldVertices = false;
-    bool             backfaceCull  = false;
+    // Which vertex input the pipeline expects. Fullscreen passes build their own vertices from
+    // gl_VertexIndex and want none; the ground reads world::Vertex; the city reads one unit cube
+    // plus a per-instance stream.
+    enum class Vertices { None, World, Building };
+    Vertices         vertices     = Vertices::None;
+    bool             backfaceCull = false;
 };
 
 VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
@@ -96,25 +99,45 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
     stages[1].pName  = "main";
 
     // Matches world::Vertex in src/world/mesh.h.
-    VkVertexInputBindingDescription binding{};
-    binding.binding   = 0;
-    binding.stride    = sizeof(world::Vertex);
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    const VkVertexInputBindingDescription worldBinding{0, sizeof(world::Vertex),
+                                                       VK_VERTEX_INPUT_RATE_VERTEX};
 
-    const VkVertexInputAttributeDescription attributes[] = {
+    const VkVertexInputAttributeDescription worldAttributes[] = {
         {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(world::Vertex, position)},
         {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(world::Vertex, normal)},
         {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(world::Vertex, albedo)},
         {3, 0, VK_FORMAT_R32_SFLOAT, offsetof(world::Vertex, rockiness)},
     };
 
+    // Matches render::BoxVertex and render::BuildingInstance. Two bindings: binding 0 steps per
+    // vertex and holds the one cube every building is drawn from, binding 1 steps per instance.
+    const VkVertexInputBindingDescription buildingBindings[] = {
+        {0, sizeof(BoxVertex), VK_VERTEX_INPUT_RATE_VERTEX},
+        {1, sizeof(BuildingInstance), VK_VERTEX_INPUT_RATE_INSTANCE},
+    };
+
+    const VkVertexInputAttributeDescription buildingAttributes[] = {
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(BoxVertex, position)},
+        {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(BoxVertex, normal)},
+        {2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(BoxVertex, uv)},
+        {3, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BuildingInstance, centerRotation)},
+        {4, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BuildingInstance, extentGrowth)},
+        {5, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BuildingInstance, bodyColor)},
+        {6, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BuildingInstance, windowColor)},
+    };
+
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    if (desc.worldVertices) {
+    if (desc.vertices == PipelineDesc::Vertices::World) {
         vertexInput.vertexBindingDescriptionCount   = 1;
-        vertexInput.pVertexBindingDescriptions      = &binding;
+        vertexInput.pVertexBindingDescriptions      = &worldBinding;
         vertexInput.vertexAttributeDescriptionCount = 4;
-        vertexInput.pVertexAttributeDescriptions    = attributes;
+        vertexInput.pVertexAttributeDescriptions    = worldAttributes;
+    } else if (desc.vertices == PipelineDesc::Vertices::Building) {
+        vertexInput.vertexBindingDescriptionCount   = 2;
+        vertexInput.pVertexBindingDescriptions      = buildingBindings;
+        vertexInput.vertexAttributeDescriptionCount = 7;
+        vertexInput.pVertexAttributeDescriptions    = buildingAttributes;
     }
 
     VkPipelineInputAssemblyStateCreateInfo assembly{};
@@ -209,7 +232,11 @@ public:
         vk::DestroyBuffer(*ctx_, &terrainIndices_);
         vk::DestroyBuffer(*ctx_, &horizonVertices_);
         vk::DestroyBuffer(*ctx_, &horizonIndices_);
+        vk::DestroyBuffer(*ctx_, &boxVertices_);
+        vk::DestroyBuffer(*ctx_, &boxIndices_);
+        vk::DestroyBuffer(*ctx_, &buildingInstances_);
 
+        if (buildingPipeline_) vkDestroyPipeline(dev, buildingPipeline_, nullptr);
         if (groundPipeline_) vkDestroyPipeline(dev, groundPipeline_, nullptr);
         if (skyPipeline_) vkDestroyPipeline(dev, skyPipeline_, nullptr);
         if (scenePipelineLayout_) vkDestroyPipelineLayout(dev, scenePipelineLayout_, nullptr);
@@ -235,19 +262,27 @@ public:
         // The sky neither tests nor writes depth: it is behind everything by definition, and it
         // is drawn first so terrain and city simply overwrite it.
         skyPipeline_ = CreateGraphicsPipeline(
-            dev, {"sky.vert", "sky.frag", passes_.hdr, scenePipelineLayout_, false, false});
+            dev, {"sky.vert", "sky.frag", passes_.hdr, scenePipelineLayout_, false, false,
+                  PipelineDesc::Vertices::None, false});
         if (!skyPipeline_) return false;
 
         // Terrain and the horizon range: depth tested and written, and back-face culled, which
         // halves the triangles rasterised for the mountains.
         groundPipeline_ = CreateGraphicsPipeline(
-            dev, {"ground.vert", "ground.frag", passes_.hdr, scenePipelineLayout_, true, true, true,
-                  true});
+            dev, {"ground.vert", "ground.frag", passes_.hdr, scenePipelineLayout_, true, true,
+                  PipelineDesc::Vertices::World, true});
         if (!groundPipeline_) return false;
+
+        // The city. Same depth and culling as the ground; a different vertex input, because these
+        // are instances of one cube rather than a mesh.
+        buildingPipeline_ = CreateGraphicsPipeline(
+            dev, {"building.vert", "building.frag", passes_.hdr, scenePipelineLayout_, true, true,
+                  PipelineDesc::Vertices::Building, true});
+        if (!buildingPipeline_) return false;
 
         tonemapPipeline_ = CreateGraphicsPipeline(
             dev, {"fullscreen.vert", "tonemap.frag", passes_.present, tonemapPipelineLayout_, false,
-                  false, false, false});
+                  false, PipelineDesc::Vertices::None, false});
         if (!tonemapPipeline_) return false;
 
         return UploadStaticGeometry();
@@ -546,7 +581,17 @@ private:
         DrawMesh(frame.cmd, horizonVertices_, horizonIndices_, horizonIndexCount_);
         DrawMesh(frame.cmd, terrainVertices_, terrainIndices_, terrainIndexCount_);
 
-        // M3b draws the city and the countdown board here.
+        if (buildingCount_) {
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, buildingPipeline_);
+
+            const VkBuffer     buffers[2] = {boxVertices_.handle, buildingInstances_.handle};
+            const VkDeviceSize offsets[2] = {0, 0};
+            vkCmdBindVertexBuffers(frame.cmd, 0, 2, buffers, offsets);
+            vkCmdBindIndexBuffer(frame.cmd, boxIndices_.handle, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(frame.cmd, boxIndexCount_, buildingCount_, 0, 0, 0);
+        }
+
+        // M3c draws the countdown board here.
 
         vkCmdEndRenderPass(frame.cmd);
     }
@@ -568,7 +613,7 @@ private:
         // Base exposure comes from the time of day. Night is not a darker noon, it is a different
         // exposure, or the city's own windows read as dim rather than as the light. M5 replaces
         // the fixed value with the histogram-driven adaptation of spec 8.2.
-        TonemapPush push{world_.sky.baseExposure, 1.0f};
+        TonemapPush push{world_.sky.baseExposure, 1.0f, world_.sky.bodyIsMoon ? 1.0f : 0.0f};
         vkCmdPushConstants(frame.cmd, tonemapPipelineLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(push), &push);
 
@@ -601,8 +646,35 @@ private:
             return false;
         }
 
-        app::Log("vulkan: uploaded %u terrain indices, %u horizon indices", terrainIndexCount_,
-                 horizonIndexCount_);
+        if (!UploadCity()) return false;
+
+        app::Log("vulkan: uploaded %u terrain indices, %u horizon indices, %u buildings",
+                 terrainIndexCount_, horizonIndexCount_, buildingCount_);
+        return true;
+    }
+
+    bool UploadCity() {
+        std::vector<BoxVertex> boxVerts;
+        std::vector<uint32_t>  boxIdx;
+        BuildUnitCube(&boxVerts, &boxIdx);
+
+        std::vector<BuildingInstance> instances;
+        PackBuildings(world_.city, &instances);
+        if (instances.empty()) return true;  // a city with no buildings is not a failure
+
+        if (!vk::CreateBufferWithData(*ctx_, boxVerts.data(), boxVerts.size() * sizeof(BoxVertex),
+                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &boxVertices_) ||
+            !vk::CreateBufferWithData(*ctx_, boxIdx.data(), boxIdx.size() * sizeof(uint32_t),
+                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT, &boxIndices_) ||
+            !vk::CreateBufferWithData(*ctx_, instances.data(),
+                                      instances.size() * sizeof(BuildingInstance),
+                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &buildingInstances_)) {
+            app::Log("vulkan: city upload failed");
+            return false;
+        }
+
+        boxIndexCount_ = static_cast<uint32_t>(boxIdx.size());
+        buildingCount_ = static_cast<uint32_t>(instances.size());
         return true;
     }
 
@@ -700,11 +772,17 @@ private:
     VkPipelineLayout      scenePipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline            skyPipeline_         = VK_NULL_HANDLE;
     VkPipeline            groundPipeline_      = VK_NULL_HANDLE;
+    VkPipeline            buildingPipeline_    = VK_NULL_HANDLE;
 
     Buffer   terrainVertices_{}, terrainIndices_{};
     Buffer   horizonVertices_{}, horizonIndices_{};
     uint32_t terrainIndexCount_ = 0;
     uint32_t horizonIndexCount_ = 0;
+
+    // One cube, and the per-instance stream that turns it into a city (spec 6.4).
+    Buffer   boxVertices_{}, boxIndices_{}, buildingInstances_{};
+    uint32_t boxIndexCount_ = 0;
+    uint32_t buildingCount_ = 0;
 
     VkSampler             sampler_               = VK_NULL_HANDLE;
     VkDescriptorSetLayout tonemapSetLayout_      = VK_NULL_HANDLE;

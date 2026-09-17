@@ -145,7 +145,10 @@ Sky MakeSky(TimeOfDay timeOfDay, uint64_t seed) {
             const float elevation = rng.Range(25.0f, 60.0f);
             sky.keyDirection      = DirectionFrom(elevation, bearing);
             sky.keyColor          = KelvinToLinearRgb(7500.0f);
-            sky.keyIntensity      = 0.35f;  // dim, but it must still read as the source
+            // Dim, but it must still read as the source. 0.35 put the desert floor at a mid
+            // tone: the base exposure of 3.0 below is there to lift the city's own windows and
+            // the stars, and it lifts the moonlit ground with them.
+            sky.keyIntensity = 0.16f;
 
             sky.zenithColor  = core::SrgbToLinear(Vec3{0.015f, 0.020f, 0.045f});
             sky.horizonColor = core::SrgbToLinear(Vec3{0.05f, 0.06f, 0.10f});

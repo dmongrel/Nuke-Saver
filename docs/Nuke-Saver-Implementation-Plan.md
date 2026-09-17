@@ -33,9 +33,12 @@ Revisions:
 | M3a Sky, terrain, horizon | done | `9a0e12a` | Captured frames at four times of day; horizon closure checked per seed |
 | M3b City and framing | done | `29bdcd1` | 500 buildings at every seed; the framing solver proved able to fail |
 | M3c Cycle and board | done | `09e36b3` | 277 checks; the board captured at three times of day |
-| M4 Fragments | done | this commit | 296 checks; captured through blast, scatter, gather, cloud and disperse; A11 soak clean over 30 minutes |
-| M5a Missile, flash, fireball, exposure | this commit | | 322 checks; the cycle now resets and repeats with a new seed |
-| M5b Bloom | next | | |
+| M4 Fragments | done | `3722853` | 296 checks; captured through blast, scatter, gather, cloud and disperse; A11 soak clean over 30 minutes |
+| M5 Missile, flash, fireball, exposure, bloom | done | `3722853` | 322 checks; the cycle now resets and repeats with a new seed |
+| M6a Particles | this commit | | 380 checks; all five systems captured in their own phases |
+| M6b Auto quality | this commit | | The controller driven by frame-time lists across every threshold it has |
+| M6c Board and camera rework | this commit | | Board captured at phase 2 and mid-countdown; camera elevation checked over 400 seeds |
+| M6d Preview stills, README, acceptance pass | next | | |
 
 ### Deferred verification
 
@@ -52,7 +55,8 @@ each one names what would settle it.
   Run properly at M4: 180,000 frames, 30 minutes, working set and handle count sampled every 30
   seconds. Flat throughout — 116.3 MB working set, 306.2 MB private, 531 handles, 408.3 MB of GPU
   memory, none of them moving, and the process reached its own end frame rather than being killed.
-  It runs again at M6.
+  It runs again at M6d, against the particle systems, which are the one thing added since that has
+  a per-frame allocation shape at all.
 
 ### Open question raised during M1
 
@@ -217,13 +221,25 @@ Exit: a full cycle runs end to end and loops cleanly. A14 passes.
 
 ### M6 — Particles and finish
 
-- The five particle systems (spec 8.3).
-- Embers, settled dust, smoke.
-- Quality scaler and the auto-quality controller (spec 11.2).
+- The five particle systems (spec 8.3). **Done.** Stateless: a particle's position, size, colour
+  and opacity are a closed-form function of its index and the clock, so there is no particle
+  buffer, no emitter to step and no slot allocation. The only particle memory in the project is
+  the per-window sorted index list, and the only per-frame work is three small compute passes that
+  bucket that list by depth.
+- Embers, settled dust, smoke. **Done** — they are three of the five.
+- Quality scaler and the auto-quality controller (spec 11.2). **Done.** One lever cannot move
+  inside a cycle: the fragment budget re-cuts every building, which means a repack, a nine-megabyte
+  reallocation and an init pass with the device idle. Stalling to recover from a stall is not a
+  trade worth making, so the fragment budget is sampled once per cycle at the reset and the levers
+  that are free — particle counts and the bloom mip count — carry the frame in between.
+- Board and camera rework, from review during M6. **Done.** The board is one face standing on the
+  desert at the near edge of the city on the camera's right, laid along the tangent of the city's
+  circle, lit at `00:00:05` from the moment it rises. The low shots draw an opening elevation per
+  cycle, cubed toward the floor.
 - Bake preview stills from a real run and wire the cross-fade, replacing M1's black. This is the
   only part of preview still outstanding; the behavior was signed off at M1.
 - Rewrite `README.md`.
-- Full acceptance pass, A1–A19. Size check against 8 MB.
+- Full acceptance pass, A1–A19. Size check against 8 MB. A11 soak again.
 
 ## 4. Module layout
 

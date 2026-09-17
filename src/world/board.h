@@ -6,7 +6,21 @@
 // light, with the city passing in front of them as the camera moves. Partial occlusion is the
 // effect, not a defect.
 //
-// Everything here is a box. The masts, the four dark face panels and all the segment bars use the
+// One face, not four, and it stands on the desert at the near edge of the city rather than on a
+// mast over the middle of it. Four faces on a tower meant the numerals were legible from every
+// bearing and therefore never revealed by anything: the camera of spec 11.1 sweeps thirty to
+// ninety degrees over a cycle, and a board that reads the same from all of them takes no part in
+// that motion.
+//
+// Near edge specifically, and off to the camera's right. Put on the far edge it is behind fifteen
+// hundred metres of city and two glyphs of eight survive; put on the axis nothing can occlude it
+// at all. On the near arc, a third of a turn round to the right, the sight line clips only the
+// outermost blocks — so a handful of buildings stand in front of the numerals, different ones from
+// one moment to the next, and the board tracks along the front of the city as the orbit carries
+// the camera past it. That is the partial occlusion the paragraph above is about, arrived at
+// properly instead of by making the board tall enough to clear the roofs.
+//
+// Everything here is a box. The legs, the dark glyph recesses and all the segment bars use the
 // same unit cube the city does, which means the whole board is one instanced draw and the segment
 // geometry is geometry rather than a texture, as spec 7.6 requires. Segments are generated from
 // the digit value — there is no font, no atlas and no glyph table beyond the seven-bit patterns,
@@ -27,7 +41,7 @@ namespace world {
 constexpr int kGlyphCount = 8;
 
 // Seven segments per glyph, so a segment is addressed by glyph * 7 + index and the whole board's
-// lit state fits in 56 bits. That is what lets the four faces be driven from one push constant and
+// lit state fits in 56 bits. That is what lets every bar be driven from one push constant and
 // therefore update in the same frame, which spec 7.6 requires.
 constexpr int kSegmentsPerGlyph = 7;
 constexpr int kSegmentIdCount   = kGlyphCount * kSegmentsPerGlyph;
@@ -56,10 +70,13 @@ struct BoardBox {
 };
 
 struct Board {
+    // Where it stands, in world XZ. Off the city axis, near the edge of the footprint.
+    core::Vec2 origin{};
+
     float yaw = 0.0f;  // fixed at cycle start and held; the board never billboards (spec 7.6)
 
     float glyphHeight = 0.0f;
-    float width       = 0.0f;  // across one face
+    float width       = 0.0f;  // across the face
     float bandBottom  = 0.0f;  // world Y of the bottom of the glyph band
     float bandTop     = 0.0f;
 
@@ -74,7 +91,13 @@ struct Board {
     std::vector<BoardBox> boxes;
 };
 
-Board GenerateBoard(uint64_t seed, const City& city);
+// `viewFrom` is where the camera stands while the countdown runs, and `viewRight` is the
+// direction its right hand points from there. The board is placed and turned relative to both —
+// which is the only way "on the near edge, off to the right" can be a property of the world rather
+// than a coincidence of the seed. It is why the board is generated after the camera has been
+// solved and not with the rest of the city.
+Board GenerateBoard(uint64_t seed, const City& city, const core::Vec3& viewFrom,
+                    const core::Vec3& viewRight);
 
 }  // namespace world
 

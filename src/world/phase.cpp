@@ -139,8 +139,17 @@ Phase Timeline::Primary(float t) const {
 }
 
 int Timeline::BoardSeconds(float t) const {
-    // Dark until the countdown lights (spec 7.6), and dark again from the flash.
-    if (t < Start(Phase::Countdown)) return -1;
+    // Lit from the moment it exists, holding at five. The board rises at the end of phase 1 and
+    // the countdown does not start until phase 3, and a board that stood dark across all of phase
+    // 2 read as a piece of scenery rather than as the thing about to happen. It shows 00:00:05
+    // from the frame it appears, which is also the only reading that makes the first digit change
+    // an event rather than the display switching on.
+    //
+    // Nothing needs a phase test for "has it risen yet": the renderer already declines to draw a
+    // board whose rise is zero, so this being lit before then is a value nobody reads.
+    if (t < Start(Phase::Countdown)) return 5;
+
+    // Dark again from the flash (spec 7.6).
     if (t >= Start(Phase::Flash)) return -1;
 
     if (t < End(Phase::Countdown)) {

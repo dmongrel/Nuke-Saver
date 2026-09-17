@@ -205,6 +205,32 @@ void TestCamera() {
     }
     Check(sawClockwise && sawAnticlockwise, "the direction of travel is randomised per cycle");
 
+    // The opening elevation of the low shots varies per cycle (spec 11.1), and the distribution is
+    // the point rather than the range: most cycles stay near the desert floor, a few climb. A
+    // uniform draw would turn "a low pass, occasionally higher" into "some height between nought
+    // and thirty degrees", which is a different shot library.
+    for (ShotType shot : {ShotType::LowApproach, ShotType::StreetLevel}) {
+        int   low = 0, high = 0;
+        float steepest = 0.0f;
+
+        for (uint64_t s = 1; s <= 400; ++s) {
+            const OrbitCamera c  = OrbitCamera::Create(s * 7919ull, shot, kCityRadius, kCycle);
+            const CameraState p0 = c.Evaluate(0.0f);
+
+            const float ground = std::sqrt(p0.eye.x * p0.eye.x + p0.eye.z * p0.eye.z);
+            const float angle  = std::atan2(p0.eye.y, ground);
+
+            if (angle < Radians(8.0f)) ++low;
+            if (angle > Radians(14.0f)) ++high;
+            steepest = std::fmax(steepest, angle);
+        }
+
+        Check(low > 200, "most cycles of a low shot open near the desert floor");
+        Check(high > 5, "and a few of them open well above it");
+        Check(steepest > Radians(20.0f) && steepest < Radians(34.0f),
+              "the steepest opening is about thirty degrees up, and no more");
+    }
+
     // Two cycles must not share a shot, and the same seed must reproduce one exactly.
     const OrbitCamera again = OrbitCamera::Create(99, ShotType::DistantRidge, kCityRadius, kCycle);
     const CameraState repeat = again.Evaluate(kCycle * 0.5f);

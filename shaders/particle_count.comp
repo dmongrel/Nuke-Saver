@@ -1,0 +1,31 @@
+#version 450
+
+// Particle sort, pass 1 of 3 (spec 8.3): how many alpha-blended particles fall in each depth
+// bucket.
+//
+// Spec 8.3 asks for the alpha-blended systems to be drawn back to front. A full sort of eighty
+// thousand keys is a bitonic network — around 150 dispatches a frame — and this is a screen saver
+// that spec 11.2 says MUST NOT work the GPU harder than it needs to. A counting sort into 256
+// depth buckets is three dispatches, and the residual error is confined to particles within one
+// bucket of each other, which at this bucket density is closer together than one particle is wide.
+//
+// The additive systems are skipped entirely: addition commutes, so their order carries no
+// information and sorting them would be work spent to produce the same image.
+
+#define PARTICLE_SET 0
+#define SCENE_SET 1
+#include "particle_common.glsl"
+#include "scene.glsl"
+
+layout(local_size_x = 64) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= ParticleTotal()) return;
+
+    Particle p;
+    if (!ParticleAt(i, pp.timing.x, p)) return;
+    if (p.additive || p.alpha <= 0.0) return;
+
+    atomicAdd(bins.count[ParticleBucket(p.pos, scene.cameraPos.xyz)], 1u);
+}

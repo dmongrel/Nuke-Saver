@@ -98,7 +98,13 @@ void TestTimeline() {
     const float countdownStart = tl.Start(Phase::Countdown);
     const float countdownEnd   = tl.End(Phase::Countdown);
 
-    Check(tl.BoardSeconds(countdownStart - 0.01f) < 0, "the board is dark before the countdown");
+    // Lit from the moment it exists, holding at five. The board goes up at the end of phase 1 and
+    // the countdown does not begin until phase 3; standing dark across the whole of phase 2 made
+    // it read as scenery. Showing 00:00:05 from the frame it appears is also what makes the first
+    // digit change an event rather than the display switching on.
+    Check(tl.BoardSeconds(countdownStart - 0.01f) == 5,
+          "the board is lit at 00:00:05 from the moment it appears");
+    Check(tl.BoardSeconds(tl.Start(Phase::Growth)) == 5, "and all the way back through phase 1");
     Check(tl.BoardSeconds(countdownStart) == 5, "the countdown opens on 5");
     Check(tl.BoardSeconds(tl.Start(Phase::Flash)) < 0, "the board goes dark at the flash");
     Check(tl.BoardSeconds(tl.Start(Phase::Missile)) == 0,
@@ -205,17 +211,24 @@ void TestBoard() {
           "01:02:07 puts a 7 in the seconds");
 
     // --- the geometry ------------------------------------------------------------------------
-    const City  city  = MakeCity(20260917ull);
-    const Board board = GenerateBoard(20260917ull, city);
+    //
+    // The board is placed and turned relative to where the camera stands during the countdown
+    // (spec 7.6), so the tests need a viewpoint. This one stands off to the east at a plausible
+    // orbit radius and height; nothing here depends on the particular numbers, only on the
+    // relationship between them and the board.
+    const City  city      = MakeCity(20260917ull);
+    const Vec3  viewFrom  = Vec3{1500.0f, 120.0f, 0.0f};
+    const Vec3  viewRight = Vec3{0.0f, 0.0f, -1.0f};  // looking at the origin from due east
+    const Board board     = GenerateBoard(20260917ull, city, viewFrom, viewRight);
 
     Check(!board.boxes.empty(), "the board generates geometry");
     Check(board.glyphHeight > 0.0f, "the glyphs have a height");
 
     // Spec 7.6: the board never billboards. Nothing here takes a time, so the yaw cannot follow
     // the camera — and generating it twice must give the same object.
-    const Board again = GenerateBoard(20260917ull, city);
+    const Board again = GenerateBoard(20260917ull, city, viewFrom, viewRight);
     Check(again.yaw == board.yaw && again.boxes.size() == board.boxes.size(),
-          "the board is a pure function of the seed and the city (never billboards)");
+          "the board is a pure function of the seed, the city and the viewpoint");
 
     bool positive = true;
     for (const BoardBox& b : board.boxes) {
@@ -223,75 +236,98 @@ void TestBoard() {
     }
     Check(positive, "no box is degenerate");
 
-    // Every segment bar sits on a flat face, so its distance from the board's axis measured along
-    // its own outward normal is the same for all of them — the face is a plane. This is the check
-    // that fails when the CPU's placement basis and the vertex shader's yaw rotation disagree: the
-    // bars still land in a neat row, but the row crosses the plane it is supposed to lie in, and
-    // half of them end up behind the face they belong to.
+    // Every segment bar sits on one flat face, so its distance from the board's own origin
+    // measured along the face's outward normal is the same for all of them. This is the check that
+    // fails when the CPU's placement basis and the vertex shader's yaw rotation disagree: the bars
+    // still land in a neat row, but the row crosses the plane it is supposed to lie in, and half
+    // of them end up behind the face they belong to.
     float depthMin = 1e9f, depthMax = -1e9f;
     bool  outward  = true;
     for (const BoardBox& b : board.boxes) {
         if (b.segmentId < 0) continue;
 
+        const Vec2  local{b.center.x - board.origin.x, b.center.y - board.origin.y};
+
         const Vec2  fwd   = ShaderForward(b.yaw);
-        const float depth = b.center.x * fwd.x + b.center.y * fwd.y;
+        const float depth = local.x * fwd.x + local.y * fwd.y;
         if (depth <= 0.0f) outward = false;
         if (depth < depthMin) depthMin = depth;
         if (depth > depthMax) depthMax = depth;
 
         // And sideways it must stay within the face it is on.
         const Vec2  right = ShaderRight(b.yaw);
-        const float side  = b.center.x * right.x + b.center.y * right.y;
+        const float side  = local.x * right.x + local.y * right.y;
         if (std::fabs(side) > board.width * 0.5f) outward = false;
     }
-    Check(outward, "every segment bar sits on the outward side of its own face, within its width");
+    Check(outward, "every segment bar sits on the outward side of the face, within its width");
     Check(depthMax - depthMin < 0.5f,
-          "all segment bars lie in one plane per face (CPU basis matches the vertex shader)");
+          "all segment bars lie in one plane (CPU basis matches the vertex shader)");
 
-    // Four identical faces, driven by one mask so they cannot disagree between frames (spec 7.6).
+    // One face, driven by one mask, so it cannot disagree with itself between frames (spec 7.6).
     std::vector<int>   counts(kSegmentIdCount, 0);
-    std::vector<float> heights(kSegmentIdCount, -1.0f);
-    std::vector<float> bases(kSegmentIdCount, 0.0f);
-
-    bool sameShape = true;
-    bool idsInRange = true;
+    bool               idsInRange = true;
+    bool               sameYaw    = true;
     for (const BoardBox& b : board.boxes) {
+        if (std::fabs(b.yaw - board.yaw) > 1e-4f) sameYaw = false;
         if (b.segmentId < 0) continue;
         if (b.segmentId >= kSegmentIdCount) {
             idsInRange = false;
             continue;
         }
         ++counts[b.segmentId];
-        if (heights[b.segmentId] < 0.0f) {
-            heights[b.segmentId] = b.height;
-            bases[b.segmentId]   = b.base;
-        } else if (std::fabs(heights[b.segmentId] - b.height) > 1e-3f ||
-                   std::fabs(bases[b.segmentId] - b.base) > 1e-3f) {
-            sameShape = false;
-        }
     }
 
     Check(idsInRange, "segment ids stay inside the mask");
+    Check(sameYaw, "every box on the board shares the board's one yaw");
 
-    int used = 0;
-    bool fourOfEach = true;
+    int  used     = 0;
+    bool onlyOnce = true;
     for (int id = 0; id < kSegmentIdCount; ++id) {
         if (counts[id] == 0) continue;
         ++used;
-        if (counts[id] != 4) fourOfEach = false;
+        if (counts[id] != 1) onlyOnce = false;
     }
-    Check(fourOfEach, "every segment appears on exactly four faces");
-    Check(sameShape, "the four copies of a segment are the same size and height");
+    Check(onlyOnce, "every segment appears exactly once — there is one face, not four");
 
     // Six digits of seven bars and two colons of two: the colons leave five ids each unused.
     Check(used == 6 * kSegmentsPerGlyph + 2 * 2, "the used segment ids are the ones HH:MM:SS needs");
 
-    // The band straddles the skyline (spec 7.6): the city passes in front of the numerals rather
-    // than standing clear of them.
-    Check(board.bandBottom < city.tallest && board.bandTop > city.tallest,
-          "the glyph band straddles the tallest roof");
+    // It stands on the desert (spec 7.6), not on a mast over the city. The band starts just above
+    // the ground and finishes below the tallest roof, so the skyline reads over and around the
+    // numerals rather than the numerals reading over the skyline.
+    Check(board.bandBottom >= 0.0f && board.bandBottom < board.glyphHeight * 0.25f,
+          "the glyph band starts on the ground");
+    Check(board.bandTop < city.tallest, "and finishes below the tallest roof");
 
-    // And the whole thing stands inside the city it belongs to.
+    bool onTheGround = true;
+    for (const BoardBox& b : board.boxes) {
+        if (b.base < -0.001f) onTheGround = false;
+    }
+    Check(onTheGround, "nothing on the board is below ground");
+
+    // Off the city axis and out at the edge of the built ground, so that the outermost blocks pass
+    // in front of it as the camera moves. Both bounds matter: at the centre nothing can occlude
+    // it, and past the edge it is a sign standing on open desert with the city behind it.
+    const float standoff =
+        std::sqrt(board.origin.x * board.origin.x + board.origin.y * board.origin.y);
+    Check(standoff > city.params.radius * 0.75f, "the board stands at the edge of the city");
+    Check(standoff < city.params.radius, "and still inside the footprint");
+
+    // The near edge, not the far one. On the far side the whole city is between the camera and the
+    // numerals and two glyphs of eight survive, which is the version this replaced.
+    {
+        const Vec2  toBoard{board.origin.x - viewFrom.x, board.origin.y - viewFrom.z};
+        const float toBoardLength = std::sqrt(toBoard.x * toBoard.x + toBoard.y * toBoard.y);
+        const float toCentre = std::sqrt(viewFrom.x * viewFrom.x + viewFrom.z * viewFrom.z);
+        Check(toBoardLength < toCentre, "the board is on the near edge of the city, not the far one");
+
+        // And off to the camera's right, so it tracks along the front of the city as the orbit
+        // carries the camera past it rather than sitting in the middle of the frame.
+        const float sideways = (toBoard.x * viewRight.x + toBoard.y * viewRight.z) / toBoardLength;
+        Check(sideways > 0.3f, "and off to the camera's right");
+    }
+
+    // And the whole thing stays inside the city it belongs to.
     float furthest = 0.0f;
     for (const BoardBox& b : board.boxes) {
         const float reach = std::sqrt(b.center.x * b.center.x + b.center.y * b.center.y) +
@@ -299,7 +335,79 @@ void TestBoard() {
                                       b.halfExtent.y * b.halfExtent.y);
         if (reach > furthest) furthest = reach;
     }
-    Check(furthest < city.params.radius, "the board's footprint fits inside the city");
+    Check(furthest < city.params.radius * 1.15f, "the board's footprint stays with the city");
+
+    // Two things at once, and they pull against each other. The face is laid along the tangent of
+    // the city's circle, so it belongs to the city's geometry rather than being aimed at the
+    // viewer — but it still has to be the front of the board that the countdown sees, not the
+    // back. A single-faced board that happened to point away would be five seconds of the cycle
+    // spent looking at the back of a sign.
+    {
+        const Vec2  fwd = ShaderForward(board.yaw);
+        const Vec2  toView{viewFrom.x - board.origin.x, viewFrom.z - board.origin.y};
+        const float length = std::sqrt(toView.x * toView.x + toView.y * toView.y);
+        const float facing = (toView.x * fwd.x + toView.y * fwd.y) / (length > 0.0f ? length : 1.0f);
+        Check(facing > 0.0f, "the countdown sees the front of the board, not the back");
+
+        // Tangential means the face's normal is close to radial: pointing straight out of the
+        // city rather than across it.
+        const float reachLength =
+            std::sqrt(board.origin.x * board.origin.x + board.origin.y * board.origin.y);
+        const float radial =
+            (board.origin.x * fwd.x + board.origin.y * fwd.y) / (reachLength > 0.0f ? reachLength
+                                                                                    : 1.0f);
+        Check(radial > 0.94f, "and the face lies along the tangent of the city's circle");
+    }
+
+    // Over sixty-four seeds, because one of those numbers is drawn per cycle and a board that
+    // points the wrong way one run in ten is a defect nobody reproduces.
+    {
+        bool everyCycleReads  = true;
+        bool everyCycleStands  = true;
+        bool everyCycleIsRight = true;
+        bool everyCycleIsNear  = true;
+
+        // Eight bearings, so the "right" test is not accidentally passing on one alignment.
+        for (uint64_t seed = 1; seed <= 64; ++seed) {
+            const City  c = MakeCity(seed * 6364136223846793005ull + 1442695040888963407ull);
+
+            const float bearing = core::kTwoPi * static_cast<float>(seed % 8) / 8.0f;
+            const float orbit   = c.params.radius * 1.9f;
+            const Vec3  from{std::cos(bearing) * orbit, 90.0f, std::sin(bearing) * orbit};
+
+            // The camera looks at the city centre from there, so its right hand is a quarter turn
+            // behind its bearing. Derived here the long way round, as the caller does.
+            const Vec3 forward = core::Normalize(Vec3{-from.x, -from.y * 0.5f, -from.z});
+            const Vec3 rightOf = core::Normalize(core::Cross(forward, Vec3{0.0f, 1.0f, 0.0f}));
+
+            const Board b = GenerateBoard(seed * 7919ull, c, from, rightOf);
+
+            const Vec2  fwd = ShaderForward(b.yaw);
+            const Vec2  toView{from.x - b.origin.x, from.z - b.origin.y};
+            const float length = std::sqrt(toView.x * toView.x + toView.y * toView.y);
+            if ((toView.x * fwd.x + toView.y * fwd.y) / (length > 0.0f ? length : 1.0f) <= 0.0f) {
+                everyCycleReads = false;
+            }
+
+            const float reach = std::sqrt(b.origin.x * b.origin.x + b.origin.y * b.origin.y);
+            if ((b.origin.x * fwd.x + b.origin.y * fwd.y) / (reach > 0.0f ? reach : 1.0f) < 0.94f) {
+                everyCycleReads = false;
+            }
+
+            const float off = std::sqrt(b.origin.x * b.origin.x + b.origin.y * b.origin.y);
+            if (off <= c.params.radius * 0.75f || off >= c.params.radius) everyCycleStands = false;
+
+            if ((-toView.x * rightOf.x + -toView.y * rightOf.z) / length < 0.3f) {
+                everyCycleIsRight = false;
+            }
+
+            if (length >= std::sqrt(from.x * from.x + from.z * from.z)) everyCycleIsNear = false;
+        }
+        Check(everyCycleReads, "and for sixty-four seeds on eight bearings, never the back of it");
+        Check(everyCycleStands, "which all stand at the edge rather than on the axis");
+        Check(everyCycleIsRight, "always on the camera's right");
+        Check(everyCycleIsNear, "and always on the near edge");
+    }
 
     // Spec 6.5: the board goes up after the last building.
     Check(board.riseStart >= city.growthEnds, "the board rises after the final building");

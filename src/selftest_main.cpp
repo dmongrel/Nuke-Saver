@@ -182,6 +182,8 @@ void TestDetonation();
 void TestFragmentLayout();
 void TestMissile();
 void TestFireAndFlash();
+void TestParticles();
+void TestQuality();
 }  // namespace selftest
 
 int main() {
@@ -205,6 +207,8 @@ int main() {
     selftest::TestFragmentLayout();
     selftest::TestMissile();
     selftest::TestFireAndFlash();
+    selftest::TestParticles();
+    selftest::TestQuality();
     TestArgs();
     TestInputWatcher();
     TestSettings();

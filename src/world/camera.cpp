@@ -2,6 +2,7 @@
 
 #include "core/rng.h"
 
+#include <cmath>
 #include <initializer_list>
 
 namespace world {
@@ -98,6 +99,32 @@ OrbitCamera OrbitCamera::Create(uint64_t seed, ShotType shot, float cityRadius,
             cam.fovStart_          = Radians(rng.Range(62.0f, 70.0f));
             cam.fovEnd_            = Radians(rng.Range(52.0f, 60.0f));
             break;
+    }
+
+    // The elevation lift (spec 11.1).
+    //
+    // The two low shots are defined by being low, and the height they open at — tens of metres
+    // against a kilometre and a half of radius — is barely above the desert floor. That is the
+    // right bottom of the range and the wrong whole range: every low-approach cycle opened from
+    // the same handspan above the sand, so the one shot that is meant to read as a pass across the
+    // ground read as the same pass every time.
+    //
+    // So the opening elevation is drawn per cycle, from level up to thirty degrees, cubed. Cubing
+    // is what keeps the character of the shot: two cycles in three stay inside the first ten
+    // degrees, which is the low pass as it was, and the rest climb — occasionally right up to a
+    // view down onto the basin. Applied to the start and carried into the end at a third of the
+    // amount, because a shot that lifts and then dives is a crane move, not an orbit.
+    if (shot == ShotType::LowApproach || shot == ShotType::StreetLevel) {
+        const float draw  = rng.Range(0.0f, 1.0f);
+        const float angle = Radians(30.0f) * draw * draw * draw;
+        const float lift  = cam.radiusStart_ * std::tan(angle);
+
+        cam.heightStart_ += lift;
+        cam.heightEnd_ += lift * 0.34f;
+
+        // The look-at rises with it, or a camera three hundred metres up still points at the
+        // skyline and puts the city in the top of the frame with the desert filling the rest.
+        cam.targetHeightStart_ += lift * 0.20f;
     }
 
     cam.radiusMid_      = (cam.radiusStart_ + cam.radiusEnd_) * 0.5f;

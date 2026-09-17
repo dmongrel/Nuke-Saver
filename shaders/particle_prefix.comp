@@ -1,0 +1,32 @@
+#version 450
+
+// Particle sort, pass 2 of 3 (spec 8.3): turn the bucket counts into write cursors.
+//
+// One workgroup, one invocation per bucket, a Hillis-Steele scan in shared memory. 256 buckets is
+// exactly one workgroup on every desktop GPU, which is why there are 256 of them: a scan that fits
+// in one workgroup needs no second level and no second dispatch.
+
+#define PARTICLE_SET 0
+#include "particle_common.glsl"
+
+layout(local_size_x = 256) in;
+
+shared uint scan[kSortBuckets];
+
+void main() {
+    uint i = gl_LocalInvocationID.x;
+
+    uint own = bins.count[i];
+    scan[i]  = own;
+    barrier();
+
+    for (uint offset = 1u; offset < kSortBuckets; offset <<= 1u) {
+        uint addend = (i >= offset) ? scan[i - offset] : 0u;
+        barrier();
+        scan[i] += addend;
+        barrier();
+    }
+
+    // Exclusive from inclusive: where this bucket's first particle goes.
+    bins.cursor[i] = scan[i] - own;
+}

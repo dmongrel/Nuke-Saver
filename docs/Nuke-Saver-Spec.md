@@ -422,12 +422,21 @@ parallaxes them against the buildings. It also means partial occlusion is not a 
 
 **Form**
 
-- A freestanding structure at the city centre, its faces carrying eight 7-segment glyphs
-  reading `HH:MM:SS` — six digits and two colons, and nothing else. No name, no marking, no
-  branding.
-- Scale is monumental: glyph height MUST be comparable to the tallest buildings, so the digits
-  read as part of the skyline rather than as a board mounted above it. Scale with the city's
-  extent rather than fixing dimensions, so a small city does not get numerals twice its width.
+- A freestanding structure standing **on the desert at the near edge of the city**, its one face
+  carrying eight 7-segment glyphs reading `HH:MM:SS` — six digits and two colons, and nothing
+  else. No name, no marking, no branding.
+- The glyph band MUST start at ground level. The numerals stand on the ground with the city
+  behind and beside them; they are not carried above the roofs on a mast.
+- Position MUST be chosen against the camera: on the arc of the footprint **nearest** the camera
+  during the countdown, and off to the camera's **right**. Placed on the far edge the whole city
+  is in the way and most of the glyphs are lost; placed on the city axis nothing can ever occlude
+  it. The near arc, a third of a turn round to the right, is what makes the outermost blocks —
+  and only those — pass in front of the numerals as the orbit carries the camera along the front
+  of the city.
+- Scale is monumental: glyph height MUST be a substantial fraction of the tallest buildings, so
+  the digits read as part of the skyline rather than as a board mounted above it. Scale with the
+  city's extent rather than fixing dimensions, so a small city does not get numerals twice its
+  width. The face MUST NOT be so wide that it wraps past the footprint at either end.
 - Foreground buildings MAY partially occlude the glyphs, and as the camera orbits they SHOULD —
   that parallax is the effect. The requirement is only that all eight glyphs stay *identifiable*
   throughout phases 3 and 4, not that they stay unobstructed.
@@ -438,25 +447,26 @@ parallaxes them against the buildings. It also means partial occlusion is not a 
 
 **Orientation**
 
-The camera orbits continuously (11.1), so a single-faced sign would turn away from it partway
-through the countdown. The board solves this the way real stadium displays do — with more faces,
-not with rotation.
+The board has **one face**. Four faces on a square mast make the numerals legible from every
+bearing and therefore revealed by nothing: the camera sweeps only 30–90° over a cycle (11.1), and
+a board that reads the same from all of those takes no part in that motion. One face turned
+towards where the camera will be squares up during the countdown and comes round into view as the
+orbit carries the camera toward it.
 
-- The board MUST carry **four identical faces** on a square mast, one per compass quadrant, each
-  showing the same time. From any bearing on the orbit, at least one face is square-on and
-  readable.
 - Yaw MUST be fixed at cycle start and held. The board MUST NOT billboard, and MUST NOT rotate to
   follow the camera. A sign that turns with the viewer destroys the illusion that it is a physical
   object, which is the entire reason it is one.
-- Yaw MAY be offset by a random angle per cycle, so the camera does not always meet a face
-  head-on at the same moment.
-- All four faces MUST update in the same frame. A face showing a stale digit is a defect.
+- Yaw MUST be set so the face points back towards the camera's countdown position, within about
+  15°, so the numerals are square to the viewer somewhere in phase 3 rather than never.
+- The whole face MUST update in the same frame. A glyph showing a stale digit is a defect.
 
 **Behavior**
 
-- Rises last during phase 1 (6.5), dark.
-- Dark through phase 2.
-- Lights at the start of phase 3 showing `00:00:05`, stepping to `00:00:00` once per second.
+- Rises last during phase 1 (6.5), **already lit, showing `00:00:05`**. A board that stood dark
+  from the moment it appeared until phase 3 read as scenery rather than as the thing about to
+  happen, and made the display look as though it switched on rather than started counting.
+- Holds `00:00:05`, lit, through phase 2.
+- Steps to `00:00:00` once per second across phase 3.
 - Holds `00:00:00`, still lit, through phase 4.
 - Goes dark at the flash and fragments when the shell reaches it in phase 6.
 - Unlit segments MUST be visible as dark recessed bars, the way real 7-segment hardware looks. A
@@ -537,6 +547,12 @@ Separate from fragments (7.3), which are their own system.
 
 GPU-simulated, instanced camera-facing quads, sorted back to front where alpha-blended. Peak
 counts scale with quality.
+
+The sort MAY be a bucketed one — a counting sort into depth slabs rather than a full comparison
+sort — provided the slabs are fine enough that the residual mis-ordering is smaller than one
+particle's own extent. A full sort of eighty thousand keys is a bitonic network of roughly 150
+dispatches a frame, which 11.2 rules out. Additive systems need no sort at all: addition commutes,
+so their order carries no information.
 
 ## 9. Screensaver behavior
 
@@ -619,11 +635,16 @@ show.
   own combination from a small library of shot types: distant ridge orbit, low fast orbit across
   the desert floor, high oblique descending orbit, close orbit rising from street level.
 - Direction of travel MUST be randomised per cycle.
+- Opening **elevation** MUST vary per cycle for the low shots. A pass across the desert floor is
+  defined by being low, but opening every cycle from the same handspan above the sand makes the
+  one shot that should read as a pass read as the same pass. The opening elevation is drawn from
+  level up to about 30°, weighted heavily toward the bottom of that range so most cycles keep the
+  low pass and a minority look down onto the basin.
 - The framing solver runs before the cycle starts and MUST satisfy all of these across the whole
   orbit arc, without a cut or a zoom: the city fits during phase 1; the countdown board is legible
-  through phases 3 and 4 (7.6 gives the board four faces so the orbit cannot defeat this); the
-  missile is on screen for its last 2 s; the full cloud fits at its widest in phase 8; the settled
-  debris field fits in phase 10.
+  through phases 3 and 4 (7.6 places and turns the board against this camera, so the solver and
+  the board are solved in that order); the missile is on screen for its last 2 s; the full cloud
+  fits at its widest in phase 8; the settled debris field fits in phase 10.
 - Cloud framing is the binding constraint — it is the widest thing in the cycle — so the solver
   MUST size the orbit radius from phase 8 and then check the rest against it.
 - A brief damped jolt when the blast front passes the camera is permitted. Nothing else

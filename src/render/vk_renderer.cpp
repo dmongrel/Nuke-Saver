@@ -16,6 +16,8 @@
 #include "app/settings.h"
 #include "render/building_data.h"
 #include "render/fragment_data.h"
+#include "render/particle_data.h"
+#include "render/quality.h"
 #include "render/scene_uniforms.h"
 #include "render/shaders_embedded.h"
 #include "render/vk/buffer.h"
@@ -109,6 +111,28 @@ struct BloomPush {
 
 static_assert(sizeof(BloomPush) == 32, "BloomPush must fit the guaranteed push range");
 
+// The particle systems (spec 8.3), in one 128-byte push block shared by the three sort passes and
+// both draws. 128 is the guaranteed push range and this is exactly at it, which is why the wind
+// here is two floats rather than three and why several fields carry an unrelated scalar in a spare
+// component. Going one vec4 over would mean a uniform buffer, and a uniform buffer written once a
+// frame and read by two windows with independent frame slots is a hazard this does not need.
+struct ParticlePush {
+    uint32_t caps[4]{};    // slot counts of systems 0..3
+    float    tail[4]{};    // x system 4 slots, y gravity, zw horizontal wind
+    float    timing[4]{};  // x cycle time, y growth start, z growth end, w city radius
+    float    mStart[4]{};  // xyz missile entry point, w missile phase start
+    float    mDir[4]{};    // xyz missile direction, w missile phase end
+    float    blast[4]{};   // xyz impact point, w the shell's final reach
+    float    phases[4]{};  // x blast start, y blast duration, z gather start, w disperse end
+    float    cloud[4]{};   // x stem height, y cap radius, z missile length, w sort range
+};
+
+static_assert(sizeof(ParticlePush) == 128, "ParticlePush must fit the guaranteed push range");
+
+// The slot budgets and the two padding words that go with the bins live in
+// render/particle_data.h, so that the emission schedule they belong to can be tested.
+constexpr size_t kParticleBinBytes = (2 * kSortBuckets + 4) * sizeof(uint32_t);
+
 // Spec 5.1 puts the countdown segments at 30-60 linear and the fireball in the thousands, all
 // against a scene whose middle grey is 1. The threshold sits above the brightest ordinary surface
 // and below the dimmest thing that is meant to glow — at 1.4 the twilight horizon band itself
@@ -173,6 +197,9 @@ struct PipelineDesc {
     // Additive blending, for the emissive passes that add light to what is already there rather
     // than replacing it: the flash, the fireball, the ground ring.
     bool             additive     = false;
+    // Ordinary source-alpha blending, for the one pass with genuinely translucent geometry: the
+    // dust half of the particle systems (spec 8.3).
+    bool             alphaBlend   = false;
 };
 
 VkPipeline CreateComputePipeline(VkDevice dev, const char* name, VkPipelineLayout layout) {
@@ -316,6 +343,14 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
         blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
         blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
         blendAttachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+    } else if (desc.alphaBlend) {
+        blendAttachment.blendEnable         = VK_TRUE;
+        blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.colorBlendOp        = VK_BLEND_OP_ADD;
+        blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.alphaBlendOp        = VK_BLEND_OP_ADD;
     }
 
     VkPipelineColorBlendStateCreateInfo blend{};
@@ -365,7 +400,10 @@ class VulkanRenderer final : public Renderer {
 public:
     VulkanRenderer(std::unique_ptr<Context> ctx, const app::Settings& settings,
                    const world::World& world)
-        : ctx_(std::move(ctx)), settings_(settings), world_(world) {}
+        : ctx_(std::move(ctx)),
+          settings_(settings),
+          world_(world),
+          quality_(QualityController::FromSettings(settings)) {}
 
     ~VulkanRenderer() override {
         if (!ctx_) return;
@@ -389,6 +427,15 @@ public:
         vk::DestroyBuffer(*ctx_, &shatterBoxes_);
         vk::DestroyBuffer(*ctx_, &fragmentRest_);
         vk::DestroyBuffer(*ctx_, &fragmentState_);
+
+        if (particleAddPipeline_) vkDestroyPipeline(dev, particleAddPipeline_, nullptr);
+        if (particleAlphaPipeline_) vkDestroyPipeline(dev, particleAlphaPipeline_, nullptr);
+        if (particleScatterPipeline_) vkDestroyPipeline(dev, particleScatterPipeline_, nullptr);
+        if (particlePrefixPipeline_) vkDestroyPipeline(dev, particlePrefixPipeline_, nullptr);
+        if (particleCountPipeline_) vkDestroyPipeline(dev, particleCountPipeline_, nullptr);
+        if (particleDrawLayout_) vkDestroyPipelineLayout(dev, particleDrawLayout_, nullptr);
+        if (particleComputeLayout_) vkDestroyPipelineLayout(dev, particleComputeLayout_, nullptr);
+        if (particleSetLayout_) vkDestroyDescriptorSetLayout(dev, particleSetLayout_, nullptr);
 
         if (fragmentPipeline_) vkDestroyPipeline(dev, fragmentPipeline_, nullptr);
         if (fragmentSimPipeline_) vkDestroyPipeline(dev, fragmentSimPipeline_, nullptr);
@@ -434,6 +481,7 @@ public:
         if (!CreateMissileLayout()) return false;
         if (!CreateBloomLayout()) return false;
         if (!CreateFragmentLayout()) return false;
+        if (!CreateParticleLayout()) return false;
         if (!CreateTonemapLayout()) return false;
 
         VkDevice dev = ctx_->device();
@@ -498,6 +546,29 @@ public:
                   PipelineDesc::Vertices::None, false, 1, true});
         if (!flashPipeline_) return false;
 
+        // The particles (spec 8.3). Two pipelines over one shader pair: dust blends, emitters
+        // add, and which one a particle belongs to is decided by the sort rather than by a branch
+        // in the fragment stage, because blend mode is pipeline state and cannot vary per draw.
+        // Neither writes depth — a translucent sprite that occludes what is behind it is not
+        // translucent — and neither is culled, because a billboard has no back.
+        particleAlphaPipeline_ = CreateGraphicsPipeline(
+            dev, {"particle.vert", "particle.frag", passes_.hdr, particleDrawLayout_, true, false,
+                  PipelineDesc::Vertices::None, false, 2, false, true});
+        particleAddPipeline_ = CreateGraphicsPipeline(
+            dev, {"particle.vert", "particle.frag", passes_.hdr, particleDrawLayout_, true, false,
+                  PipelineDesc::Vertices::None, false, 2, true, false});
+        if (!particleAlphaPipeline_ || !particleAddPipeline_) return false;
+
+        particleCountPipeline_ =
+            CreateComputePipeline(dev, "particle_count.comp", particleComputeLayout_);
+        particlePrefixPipeline_ =
+            CreateComputePipeline(dev, "particle_prefix.comp", particleComputeLayout_);
+        particleScatterPipeline_ =
+            CreateComputePipeline(dev, "particle_scatter.comp", particleComputeLayout_);
+        if (!particleCountPipeline_ || !particlePrefixPipeline_ || !particleScatterPipeline_) {
+            return false;
+        }
+
         fragmentInitPipeline_ = CreateComputePipeline(dev, "fragment_init.comp",
                                                       fragmentComputeLayout_);
         fragmentSimPipeline_  = CreateComputePipeline(dev, "fragment_sim.comp",
@@ -561,6 +632,22 @@ public:
         if (a.exposure.mapped) std::memset(a.exposure.mapped, 0, kExposureBytes);
         BindExposureBuffer(a.tonemapSet, a.exposure);
 
+        // The sort's output, sized for quality level 0 so that changing quality is a push
+        // constant and never a reallocation. Two ranges of `total`: the alpha-blended particles
+        // ordered far to near, then the additive ones packed after them.
+        const size_t sortBytes = size_t(ParticleTotal(0)) * 2 * sizeof(uint32_t);
+        if (!vk::CreateBuffer(*ctx_, sortBytes,
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                              vk::BufferUse::GpuOnly, &a.particleSort) ||
+            !vk::CreateBuffer(*ctx_, kParticleBinBytes,
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                              vk::BufferUse::GpuOnly, &a.particleBins) ||
+            !AllocateSet(particleSetLayout_, &a.particleSet)) {
+            DestroyAttached(a);
+            return false;
+        }
+        BindParticleBuffers(a);
+
         const uint32_t levels = a.target->bloomLevels();
         a.bloomDown.assign(levels, VK_NULL_HANDLE);
         a.bloomUp.assign(levels, VK_NULL_HANDLE);
@@ -606,10 +693,30 @@ public:
         // so the cycle's own time is measured from where this cycle began.
         if (elapsed - cycleBase_ >= static_cast<double>(world_.cycleSeconds)) {
             cycleBase_ = elapsed;
+            // The one moment the fragment budget is allowed to move: everything it touches is
+            // being rebuilt anyway.
+            fragmentQuality_ = QualityLevel();
             ResetCycle();
         }
 
         const float t = static_cast<float>(elapsed - cycleBase_);
+
+        // Spec 11.2's controller. Fed the raw delta rather than the clamped one below: what it is
+        // measuring is how long the frame actually took, and a clamp would hide exactly the
+        // frames it exists to notice.
+        {
+            const int before = quality_.level();
+            quality_.Update(static_cast<float>(delta));
+            if (quality_.level() != before) {
+                app::Log("quality: %s to level %d (%.1f fps average)",
+                         quality_.level() > before ? "down" : "up", quality_.level(),
+                         quality_.average() > 0.0f ? 1.0 / double(quality_.average()) : 0.0);
+            }
+        }
+
+        // The particle budget follows the level immediately; the fragment budget waits for the
+        // reset above, which is why this is read every frame and FragmentQuality is not.
+        particleTotal_ = ParticleTotal(QualityLevel());
 
         // Spec 4.2 clamps the delta before it reaches the simulation; the host already did, and
         // this floor keeps a 1000 fps frame from stepping the springs by nothing at all.
@@ -632,6 +739,10 @@ public:
             }
             UpdateSceneUniforms(w, frame.frameSlot, t);
             RefreshTonemapBinding(w);
+
+            // Per window, not per frame: the sort is by distance from a camera, and two monitors
+            // do not share one (spec 8.3).
+            RecordParticleSort(frame, w);
 
             RecordScene(frame, w);
             RecordBloom(frame, w);
@@ -688,6 +799,12 @@ private:
         // adaptation has to carry across frames.
         Buffer exposure{};
 
+        // The particle sort (spec 8.3). Per window for the same reason the exposure is: back to
+        // front is a property of a camera, and two monitors do not share one.
+        Buffer          particleSort{};
+        Buffer          particleBins{};
+        VkDescriptorSet particleSet = VK_NULL_HANDLE;
+
         // Bloom, one descriptor set per step. `bloomDown[i]` reads level i-1 (or the HDR image at
         // i == 0) and writes level i; `bloomUp[i]` reads level i and adds into level i-1.
         std::vector<VkDescriptorSet> bloomDown;
@@ -697,6 +814,8 @@ private:
     void DestroyAttached(Attached& a) {
         for (uint32_t i = 0; i < kFramesInFlight; ++i) vk::DestroyBuffer(*ctx_, &a.sceneUbo[i]);
         vk::DestroyBuffer(*ctx_, &a.exposure);
+        vk::DestroyBuffer(*ctx_, &a.particleSort);
+        vk::DestroyBuffer(*ctx_, &a.particleBins);
         a.target.reset();
         // Descriptor sets are freed with the pool, which outlives every window.
     }
@@ -712,14 +831,15 @@ private:
             // bloom step.
             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8 * 2 + bloomSets},
             // The fragment buffers, one set for the whole renderer, plus one auto-exposure buffer
-            // per window: the first are the world's, the second is a window's.
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 + 8},
+            // and two particle buffers per window: the first are the world's, the rest are a
+            // window's, because both the exposure and the sort order belong to a view.
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 + 8 + 8 * 2},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, bloomSets},
         };
 
         VkDescriptorPoolCreateInfo dpi{};
         dpi.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpi.maxSets       = 8 * (kFramesInFlight + 1) + 1 + bloomSets;
+        dpi.maxSets       = 8 * (kFramesInFlight + 2) + 1 + bloomSets;
         dpi.poolSizeCount = 4;
         dpi.pPoolSizes    = sizes;
         return vkCreateDescriptorPool(ctx_->device(), &dpi, nullptr, &descriptorPool_) == VK_SUCCESS;
@@ -730,9 +850,11 @@ private:
         binding.binding         = 0;
         binding.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         binding.descriptorCount = 1;
-        // Visible to both stages: the vertex stage needs viewProj for the geometry M3b adds, the
-        // fragment stage needs the lighting.
-        binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        // Visible to all three stages: the vertex stage needs viewProj, the fragment stage needs
+        // the lighting, and the particle sort needs the camera position, because which particle is
+        // behind which is a question about a view rather than about the world (spec 8.3).
+        binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+                             VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorSetLayoutCreateInfo dsl{};
         dsl.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -966,8 +1088,9 @@ private:
         // reaches past the city and pools on open desert, which reads as a second sunset rather
         // than as a sign lighting the roofs under it.
         SetBoardLight(&uniforms,
-                      core::Vec3{0.0f, (world_.board.bandBottom + world_.board.bandTop) * 0.5f,
-                                 0.0f},
+                      core::Vec3{world_.board.origin.x,
+                                 (world_.board.bandBottom + world_.board.bandTop) * 0.5f,
+                                 world_.board.origin.y},
                       lit ? rise * 2.0f : 0.0f, world_.board.glyphHeight * 1.5f);
 
         SetBlast(&uniforms, world_.detonation.center, world_.ShellRadius(t));
@@ -1201,6 +1324,31 @@ private:
             vkCmdDraw(frame.cmd, 3, fragmentLayout_.total, 0, 0);
         }
 
+        // The particles (spec 8.3). After everything that writes depth, so they are occluded
+        // correctly, and before the emissive passes, so the fireball's glow goes over the dust it
+        // is lighting rather than under it.
+        //
+        // Both draws run the full instance count whatever is actually alive. The live count is a
+        // number only the GPU knows, and the choice is between an indirect draw plus the barrier
+        // it needs or a few thousand vertex invocations that clip themselves away immediately.
+        if (particleTotal_ && w.particleSet) {
+            const VkDescriptorSet sets[2] = {w.sceneSet[frame.frameSlot], w.particleSet};
+            vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, particleDrawLayout_,
+                                    0, 2, sets, 0, nullptr);
+
+            const ParticlePush push = BuildParticlePush(frameTime_);
+            vkCmdPushConstants(frame.cmd, particleDrawLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                               sizeof(push), &push);
+
+            // The dust, far to near, then the emitters. firstInstance is what picks the half of
+            // the sorted buffer each draw reads, which is why one vertex shader serves both.
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, particleAlphaPipeline_);
+            vkCmdDraw(frame.cmd, 6, particleTotal_, 0, 0);
+
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, particleAddPipeline_);
+            vkCmdDraw(frame.cmd, 6, particleTotal_, 0, particleTotal_);
+        }
+
         // Emissive, after the opaque geometry and in the order spec 8.1 gives: the fireball is
         // occluded by what is in front of it, the flash is occluded by nothing.
         if (world_.FireRadius(frameTime_) > 0.0f) {
@@ -1249,7 +1397,7 @@ private:
     // down to the smallest level with a thresholded first step, then back up with a tent filter,
     // summing as it goes, so level 0 ends up holding the whole chain.
     void RecordBloom(const WindowTarget::Frame& frame, Attached& w) {
-        const uint32_t levels = w.target->bloomLevels();
+        const uint32_t levels = BloomLevelsFor(w);
         if (!levels) return;
 
         // The whole chain is rewritten every frame, so the previous contents are worth nothing and
@@ -1535,12 +1683,204 @@ private:
         return true;
     }
 
-    // Spec 11.2's first quality lever. M6 turns it into the auto-quality controller; until then it
-    // is fixed, with an override so a run can be measured at a level it would not choose.
-    static int FragmentQuality() {
+    void BindParticleBuffers(Attached& a) {
+        const Buffer* buffers[2] = {&a.particleSort, &a.particleBins};
+
+        VkDescriptorBufferInfo infos[2]{};
+        VkWriteDescriptorSet   writes[2]{};
+        for (uint32_t i = 0; i < 2; ++i) {
+            infos[i].buffer = buffers[i]->handle;
+            infos[i].range  = VK_WHOLE_SIZE;
+
+            writes[i].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet          = a.particleSet;
+            writes[i].dstBinding      = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].pBufferInfo     = &infos[i];
+        }
+        vkUpdateDescriptorSets(ctx_->device(), 2, writes, 0, nullptr);
+    }
+
+    // The sort buffers and the two layouts that reach them. Same split as the fragments: compute
+    // takes them as set 0 and the draw, which already spends set 0 on the scene, takes them as
+    // set 1 - which is why shaders/particle_common.glsl parameterises its set index.
+    bool CreateParticleLayout() {
+        VkDevice dev = ctx_->device();
+
+        VkDescriptorSetLayoutBinding bindings[2]{};
+        for (uint32_t i = 0; i < 2; ++i) {
+            bindings[i].binding         = i;
+            bindings[i].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bindings[i].descriptorCount = 1;
+            bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT;
+        }
+
+        VkDescriptorSetLayoutCreateInfo dsl{};
+        dsl.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dsl.bindingCount = 2;
+        dsl.pBindings    = bindings;
+        if (vkCreateDescriptorSetLayout(dev, &dsl, nullptr, &particleSetLayout_) != VK_SUCCESS) {
+            return false;
+        }
+
+        const VkDescriptorSetLayout computeSets[2] = {particleSetLayout_, sceneSetLayout_};
+
+        VkPushConstantRange computePush{};
+        computePush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        computePush.size       = sizeof(ParticlePush);
+
+        VkPipelineLayoutCreateInfo cli{};
+        cli.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        cli.setLayoutCount         = 2;
+        cli.pSetLayouts            = computeSets;
+        cli.pushConstantRangeCount = 1;
+        cli.pPushConstantRanges    = &computePush;
+        if (vkCreatePipelineLayout(dev, &cli, nullptr, &particleComputeLayout_) != VK_SUCCESS) {
+            return false;
+        }
+
+        const VkDescriptorSetLayout drawSets[2] = {sceneSetLayout_, particleSetLayout_};
+
+        // Vertex only: the fragment stage is handed everything it needs as varyings, so it has no
+        // reason to see a block that is already at the guaranteed size limit.
+        VkPushConstantRange drawPush{};
+        drawPush.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        drawPush.size       = sizeof(ParticlePush);
+
+        VkPipelineLayoutCreateInfo gli{};
+        gli.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        gli.setLayoutCount         = 2;
+        gli.pSetLayouts            = drawSets;
+        gli.pushConstantRangeCount = 1;
+        gli.pPushConstantRanges    = &drawPush;
+        return vkCreatePipelineLayout(dev, &gli, nullptr, &particleDrawLayout_) == VK_SUCCESS;
+    }
+
+    // Fills the particle push block. Like the fragment one, everything in it is a pure function of
+    // the world and the clock, so the field a capture shows is the field that same `t` always has.
+    ParticlePush BuildParticlePush(float t) const {
+        const world::Detonation& det = world_.detonation;
+        const world::Timeline&   tl  = world_.timeline;
+        const int                q   = QualityLevel();
+
+        ParticlePush push;
+        for (uint32_t i = 0; i < 4; ++i) push.caps[i] = ParticleCapacity(static_cast<int>(i), q);
+        push.tail[0] = static_cast<float>(ParticleCapacity(4, q));
+        push.tail[1] = det.gravity;
+        push.tail[2] = det.wind.x;
+        push.tail[3] = det.wind.z;
+
+        push.timing[0] = t;
+        push.timing[1] = tl.Start(world::Phase::Growth);
+        push.timing[2] = tl.End(world::Phase::Growth);
+        push.timing[3] = world_.cityRadius;
+
+        const core::Vec3 dir = det.MissileDirection();
+        push.mStart[0] = det.missileStart.x;
+        push.mStart[1] = det.missileStart.y;
+        push.mStart[2] = det.missileStart.z;
+        push.mStart[3] = tl.Start(world::Phase::Missile);
+        push.mDir[0]   = dir.x;
+        push.mDir[1]   = dir.y;
+        push.mDir[2]   = dir.z;
+        push.mDir[3]   = tl.End(world::Phase::Missile);
+
+        push.blast[0] = det.center.x;
+        push.blast[1] = det.center.y;
+        push.blast[2] = det.center.z;
+        push.blast[3] = det.reach;
+
+        push.phases[0] = tl.Start(world::Phase::Blast);
+        push.phases[1] = tl.Duration(world::Phase::Blast);
+        push.phases[2] = tl.Start(world::Phase::Gather);
+        push.phases[3] = tl.End(world::Phase::Disperse);
+
+        push.cloud[0] = det.stemHeight;
+        push.cloud[1] = det.capRadius;
+        push.cloud[2] = det.missileLength;
+        // How far out the depth buckets reach. Sized to the orbit rather than to the far plane:
+        // past this everything lands in bucket 0, and everything that far away is haze anyway.
+        push.cloud[3] = world_.cityRadius * 8.0f;
+        return push;
+    }
+
+    // The three sort passes, recorded per window before its render pass opens (spec 8.3).
+    //
+    // Clear, count, scan, scatter. The two clears are vkCmdFillBuffer rather than a clearing
+    // dispatch because a fill is fixed-function DMA and a dispatch is not.
+    void RecordParticleSort(const WindowTarget::Frame& frame, Attached& w) {
+        const uint32_t total = particleTotal_;
+        if (!total || !w.particleSet) return;
+
+        VkCommandBuffer cmd = frame.cmd;
+
+        // kParticleNone, so anything the scatter does not write draws as a degenerate triangle.
+        vkCmdFillBuffer(cmd, w.particleSort.handle, 0, VK_WHOLE_SIZE, 0xffffffffu);
+        vkCmdFillBuffer(cmd, w.particleBins.handle, 0, VK_WHOLE_SIZE, 0u);
+        FillBarrier(cmd);
+
+        const VkDescriptorSet sets[2] = {w.particleSet, w.sceneSet[frame.frameSlot]};
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleComputeLayout_, 0, 2,
+                                sets, 0, nullptr);
+
+        const ParticlePush push = BuildParticlePush(frameTime_);
+        vkCmdPushConstants(cmd, particleComputeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                           sizeof(push), &push);
+
+        const uint32_t groups = (total + 63) / 64;
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleCountPipeline_);
+        vkCmdDispatch(cmd, groups, 1, 1);
+        Barrier(cmd);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particlePrefixPipeline_);
+        vkCmdDispatch(cmd, 1, 1, 1);
+        Barrier(cmd);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, particleScatterPipeline_);
+        vkCmdDispatch(cmd, groups, 1, 1);
+        Barrier(cmd);
+    }
+
+    // The two fills above are transfer writes and everything after them is a shader access, which
+    // is a different pipeline stage and a different access mask than Barrier covers.
+    static void FillBarrier(VkCommandBuffer cmd) {
+        VkMemoryBarrier barrier{};
+        barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+                             nullptr);
+    }
+
+    // The level to render at, 0 being the best. The environment override wins over everything,
+    // including `auto`, so a run can be measured at a level it would not have chosen.
+    int QualityLevel() const {
         const char* env = std::getenv("NUKE_SAVER_QUALITY");
         if (env && env[0] >= '0' && env[0] <= '3') return env[0] - '0';
-        return 1;  // 200 triangles a building
+        return quality_.level();
+    }
+
+    // The fragment budget, which is spec 11.2's first lever and the one that cannot move inside a
+    // cycle: changing it re-cuts every building, which means repacking 558 boxes, reallocating
+    // nine megabytes and re-running the init pass with the device idle. That is a visible stall,
+    // and stalling to recover from a stall is not a trade worth making. So it is sampled once per
+    // cycle, at the reset, and the levers that are free — particle counts and the bloom chain —
+    // carry the frame in between.
+    int FragmentQuality() const { return fragmentQuality_; }
+
+    // Spec 11.2 gives up bloom mip count after particle counts. Cheap to change and free to change
+    // mid-frame: it is a loop bound and nothing else.
+    uint32_t BloomLevelsFor(const Attached& w) const {
+        const uint32_t have = w.target->bloomLevels();
+        const uint32_t caps[kQualityLevels] = {kMaxBloomLevels, kMaxBloomLevels, 4, 3};
+        const uint32_t cap  = caps[QualityLevel() < 0 ? 0
+                                   : (QualityLevel() >= kQualityLevels ? kQualityLevels - 1
+                                                                       : QualityLevel())];
+        return have < cap ? have : cap;
     }
 
     // Fills the push block from the world and the clock. Everything in it is a pure function of
@@ -1757,6 +2097,24 @@ private:
     VkPipeline            fragmentSimPipeline_  = VK_NULL_HANDLE;
     VkPipeline            fragmentPipeline_     = VK_NULL_HANDLE;
     VkDescriptorSet       fragmentSet_          = VK_NULL_HANDLE;
+
+    // The particle systems (spec 8.3). No particle buffer: a particle is a closed-form function
+    // of its index and the clock, so the only memory here is the per-window sort order, which
+    // lives with the window. What is renderer-wide is the pipelines and how many slots there are.
+    VkDescriptorSetLayout particleSetLayout_       = VK_NULL_HANDLE;
+    VkPipelineLayout      particleComputeLayout_   = VK_NULL_HANDLE;
+    VkPipelineLayout      particleDrawLayout_      = VK_NULL_HANDLE;
+    VkPipeline            particleCountPipeline_   = VK_NULL_HANDLE;
+    VkPipeline            particlePrefixPipeline_  = VK_NULL_HANDLE;
+    VkPipeline            particleScatterPipeline_ = VK_NULL_HANDLE;
+    VkPipeline            particleAlphaPipeline_   = VK_NULL_HANDLE;
+    VkPipeline            particleAddPipeline_     = VK_NULL_HANDLE;
+    uint32_t              particleTotal_           = 0;
+
+    // Spec 11.2's auto-quality controller, and the fragment budget it is allowed to change only
+    // at a cycle boundary.
+    QualityController quality_;
+    int               fragmentQuality_ = kQualityDefault;
 
     Buffer         shatterBoxes_{}, fragmentRest_{}, fragmentState_{};
     FragmentLayout fragmentLayout_{};

@@ -138,7 +138,6 @@ World Generate(const app::Settings& settings, uint64_t seed) {
         world.cityRadius = world.city.params.radius;
     }
 
-    world.board      = GenerateBoard(world.seed, world.city);
     world.detonation = Detonation::Create(world.seed, world.cityRadius, world.city.tallest);
     world.missileMesh =
         BuildMissileMesh(world.seed, world.detonation.missileLength, world.detonation.missileRadius);
@@ -196,6 +195,22 @@ World Generate(const app::Settings& settings, uint64_t seed) {
                  world.camera.FramingFill(missile, missileVisibleFrom),
                  world.camera.FramingFill(cloud, world.timeline.Start(Phase::Disperse)),
                  world.camera.FramingFill(debris, world.timeline.Start(Phase::Fade)));
+    }
+
+    // The board comes after the camera, which is the opposite of everything else here. It is
+    // placed and turned relative to where the camera will be standing when the countdown runs
+    // (spec 7.6): one face, off to one side of the city, square to the viewer somewhere in the
+    // five seconds that matter. That cannot be decided before the shot has been solved, because
+    // solving the shot is what moves the camera.
+    {
+        const CameraState view = world.camera.Evaluate(world.timeline.Start(Phase::Countdown) + 2.5f);
+
+        // The camera's right hand, from its own basis rather than from its bearing: the look-at
+        // drifts (spec 11.1), so "right" is not simply a quarter turn round the orbit.
+        const core::Vec3 forward = core::Normalize(view.target - view.eye);
+        const core::Vec3 right   = core::Normalize(core::Cross(forward, view.up));
+
+        world.board = GenerateBoard(world.seed, world.city, view.eye, right);
     }
 
     // The range is sized against the shot that actually happens. A peak shorter than the camera

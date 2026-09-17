@@ -1,0 +1,38 @@
+#version 450
+
+// Particle sort, pass 3 of 3 (spec 8.3): write each live particle's index into its ordered slot.
+//
+// The two halves of the output buffer are filled differently on purpose. Alpha-blended particles
+// take the slot their bucket's cursor hands them, so the first half comes out ordered far to near.
+// Additive ones are appended to the second half in whatever order they arrive, because addition
+// commutes and the only thing that matters about them is that they are packed together.
+//
+// Anything not written this frame keeps the kParticleNone the buffer was cleared to, and the
+// vertex shader turns those into a degenerate triangle. That is what lets both draws use a fixed
+// instance count and avoids an indirect draw for a number the CPU would only have to read back.
+
+#define PARTICLE_SET 0
+#define SCENE_SET 1
+#include "particle_common.glsl"
+#include "scene.glsl"
+
+layout(local_size_x = 64) in;
+
+void main() {
+    uint i     = gl_GlobalInvocationID.x;
+    uint total = ParticleTotal();
+    if (i >= total) return;
+
+    Particle p;
+    if (!ParticleAt(i, pp.timing.x, p)) return;
+    if (p.alpha <= 0.0) return;
+
+    if (p.additive) {
+        uint slot = atomicAdd(bins.additive, 1u);
+        if (slot < total) sorted[total + slot] = i;
+        return;
+    }
+
+    uint slot = atomicAdd(bins.cursor[ParticleBucket(p.pos, scene.cameraPos.xyz)], 1u);
+    if (slot < total) sorted[slot] = i;
+}

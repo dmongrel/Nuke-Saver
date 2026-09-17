@@ -137,7 +137,8 @@ void TestFragmentLayout() {
     Check(levels, "the quality levels produce 300, 200, 120 and 60 triangles a building");
 
     const City  city  = MakeCity(20260917ull);
-    const Board board = GenerateBoard(20260917ull, city);
+    const Board board = GenerateBoard(20260917ull, city, core::Vec3{1500.0f, 120.0f, 0.0f},
+                                      core::Vec3{0.0f, 0.0f, -1.0f});
 
     std::vector<ShatterBox> boxes;
     FragmentLayout          layout;

@@ -4,6 +4,8 @@
 #include "core/color.h"
 #include "core/rng.h"
 
+#include <cmath>
+
 namespace world {
 namespace {
 
@@ -155,19 +157,83 @@ uint64_t BoardMask(int seconds) {
     return mask;
 }
 
-Board GenerateBoard(uint64_t seed, const City& city) {
+Board GenerateBoard(uint64_t seed, const City& city, const core::Vec3& viewFrom,
+                    const core::Vec3& viewRight) {
     core::Rng rng = core::Rng(seed).Fork(0xB0A2Dull);
 
     Board board;
 
-    // Yaw is fixed at cycle start and held (spec 7.6). Offset per cycle so the camera does not
-    // always meet a face head-on at the same moment.
-    board.yaw = rng.Range(0.0f, core::kPi * 0.5f);
+    // Where the camera stands during the countdown, as a bearing from the city's axis. The near
+    // arc of the footprint is the one around that bearing; swinging a little either way along it
+    // stays near and moves sideways in the frame.
+    const float viewBearing = std::atan2(viewFrom.z, viewFrom.x);
+
+    // A third of a turn round the near arc, and out at the edge of the built ground. Both numbers
+    // are doing a job. The angle decides how much city the sight line crosses: on the axis nothing
+    // can ever stand in front of the board, and much past this it is looking across the whole
+    // footprint at the far side. The radius decides which buildings those are — at the edge they
+    // are the outermost blocks, which are the short ones, so they interrupt the numerals rather
+    // than hiding them.
+    const float swing = rng.Range(core::Radians(28.0f), core::Radians(46.0f));
+    const float reach = city.params.radius * rng.Range(0.82f, 0.92f);
+
+    // Which way round the arc puts it on the camera's right. Worked out by trying both and
+    // measuring rather than by deriving a sign from the bearing: the camera's right depends on its
+    // look-at as well as its position, and spec 11.1 has the look-at drifting.
+    const Vec2 right{viewRight.x, viewRight.z};
+    float      best = -1e9f;
+    for (int side = 0; side < 2; ++side) {
+        const float around = viewBearing + (side ? swing : -swing);
+        const Vec2  at{std::cos(around) * reach, std::sin(around) * reach};
+
+        const float offset = (at.x - viewFrom.x) * right.x + (at.y - viewFrom.z) * right.y;
+        if (offset > best) {
+            best         = offset;
+            board.origin = at;
+        }
+    }
+
+    // Laid along the tangent of the city's own circle, not square to the viewer.
+    //
+    // Square-on, the board read as a sign that had been aimed at the camera — which is the
+    // billboard spec 7.6 spends a paragraph ruling out, arrived at by orientation rather than by
+    // shape. Along the tangent it belongs to the city's geometry instead of the viewer's, and the
+    // numerals rake away into the skyline the way lettering does when it has been built into a
+    // shot rather than composited onto it. The camera's own motion then does the rest: the orbit
+    // carries it round toward square across the cycle.
+    //
+    // Built from the tangent rather than as an angle off the line to the camera, which is the same
+    // thing said two ways but only one of them is stable. That line runs anywhere from fifty to
+    // seventy degrees off radial depending on where round the arc the board landed and how far out
+    // the orbit was solved, so a fixed turn away from it lands somewhere different every cycle —
+    // occasionally well past the tangent and onto the back of the board.
+    //
+    // The lean is what keeps it readable. Exactly tangential, the face is edge-on to anything on
+    // the orbit at a shallow angle; ten degrees or so back toward the camera costs nothing of the
+    // rake and guarantees the countdown is looking at the front.
+    const Vec2  toView{viewFrom.x - board.origin.x, viewFrom.z - board.origin.y};
+    const float outward = std::atan2(board.origin.y, board.origin.x);
+    const float toward  = std::atan2(toView.y, toView.x);
+
+    // Which way round from radial the camera lies, so the lean is toward it whichever side of the
+    // board it is on.
+    float bias = toward - outward;
+    while (bias > core::kPi) bias -= core::kTwoPi;
+    while (bias < -core::kPi) bias += core::kTwoPi;
+
+    const float lean   = rng.Range(core::Radians(6.0f), core::Radians(18.0f));
+    const float facing = outward + (bias >= 0.0f ? lean : -lean);
+
+    // The face's outward normal is (-sin yaw, cos yaw) in the box frame the vertex shader uses,
+    // so the yaw that points it along `facing` is a quarter turn behind it.
+    board.yaw = facing - core::kPi * 0.5f;
 
     // Sized by width first, then the glyph height falls out of it. The other way round — picking a
     // glyph height comparable to the tallest building and multiplying by eight glyphs — gives a
-    // board wider than the city it stands in.
-    const float faceWidth = city.params.radius * 0.80f;
+    // board wider than the city it stands in. Narrower than it was when it stood on the city axis:
+    // out at the edge, a board as wide as the city wraps past the footprint at both ends and stops
+    // being part of the city at all.
+    const float faceWidth = city.params.radius * 0.46f;
 
     float widthInHeights = 0.0f;
     for (int g = 0; g < kGlyphCount; ++g) {
@@ -178,9 +244,10 @@ Board GenerateBoard(uint64_t seed, const City& city) {
     board.glyphHeight = faceWidth / widthInHeights;
     board.width       = faceWidth;
 
-    // The band straddles the skyline: the digits start below the tallest roofs and finish above
-    // them, so the city passes in front of them as the camera orbits rather than standing clear.
-    board.bandBottom = city.tallest * 0.55f;
+    // On the ground. The digits stand on the desert with the city behind them, at about half the
+    // height of the tallest building, so the skyline reads over and around them instead of the
+    // board reading over the skyline.
+    board.bandBottom = board.glyphHeight * 0.10f;
     board.bandTop    = board.bandBottom + board.glyphHeight;
 
     board.faceColor = core::Albedo(core::palette::kBoardFrame, seed, 0, 0);
@@ -204,12 +271,11 @@ Board GenerateBoard(uint64_t seed, const City& city) {
     const float barHalfD   = board.glyphHeight * kBarDepth * 0.5f;
     const float railThick  = board.glyphHeight * kRailThick;
 
-    // Four identical faces on a square mast, one per compass quadrant (spec 7.6). Each glyph gets
-    // its own dark recess rather than the whole face getting one panel: spec 7.6 forbids a heavy
-    // frame, and a single slab 580 m across is a billboard with numbers on it, which is the one
-    // thing the board must not look like.
-    for (int face = 0; face < 4; ++face) {
-        const float yaw = board.yaw + core::kPi * 0.5f * static_cast<float>(face);
+    // One face. Each glyph gets its own dark recess rather than the whole face getting one panel:
+    // spec 7.6 forbids a heavy frame, and a single slab 450 m across is a billboard with numbers
+    // on it, which is the one thing the board must not look like.
+    {
+        const float yaw = board.yaw;
         const float c   = std::cos(yaw);
         const float s   = std::sin(yaw);
 
@@ -223,7 +289,7 @@ Board GenerateBoard(uint64_t seed, const City& city) {
         // The lattice the glyphs hang from: two slender rails, one under the band and one over it.
         for (int rail = 0; rail < 2; ++rail) {
             BoardBox bar;
-            bar.center     = Vec2{outward.x * half, outward.y * half};
+            bar.center     = board.origin;
             bar.base       = rail == 0 ? board.bandBottom - pad - railThick : board.bandTop + pad;
             bar.height     = railThick;
             bar.halfExtent = Vec2{half, panelHalfD};
@@ -243,8 +309,8 @@ Board GenerateBoard(uint64_t seed, const City& city) {
                 const float offset = u + glyphWidth * 0.5f - faceWidth * 0.5f;
 
                 BoardBox recess;
-                recess.center     = Vec2{across.x * offset + outward.x * half,
-                                         across.y * offset + outward.y * half};
+                recess.center     = Vec2{board.origin.x + across.x * offset,
+                                         board.origin.y + across.y * offset};
                 recess.base       = board.bandBottom - pad;
                 recess.height     = board.glyphHeight + pad * 2.0f;
                 recess.halfExtent = Vec2{glyphWidth * 0.5f, panelHalfD};
@@ -261,11 +327,11 @@ Board GenerateBoard(uint64_t seed, const City& city) {
 
                 // u runs from the left edge of the face; convert to an offset from its centre.
                 const float offset = bar.u - faceWidth * 0.5f;
-                const float depth  = half + panelHalfD + barHalfD;
+                const float depth  = panelHalfD + barHalfD;
 
                 BoardBox box;
-                box.center = Vec2{across.x * offset + outward.x * depth,
-                                  across.y * offset + outward.y * depth};
+                box.center = Vec2{board.origin.x + across.x * offset + outward.x * depth,
+                                  board.origin.y + across.y * offset + outward.y * depth};
                 box.base       = board.bandBottom + bar.v - bar.halfV;
                 box.height     = bar.halfV * 2.0f;
                 box.halfExtent = Vec2{bar.halfU, barHalfD};
@@ -278,25 +344,25 @@ Board GenerateBoard(uint64_t seed, const City& city) {
         }
     }
 
-    // The mast. Four thin uprights at the corners of the square, from the ground to the top rail.
-    // Spec 7.6 wants the structure minimal: a heavy frame turns monumental typography back into a
-    // billboard, so this is all there is holding the board up.
+    // Two thin uprights at the ends of the face, from the ground to the top rail. Spec 7.6 wants
+    // the structure minimal: a heavy frame turns monumental typography back into a billboard, so
+    // this is all there is holding the board up. It is also nearly all of what is left of the
+    // structure now that there is no mast, which is the point — the numerals stand on the desert
+    // rather than being carried above it.
     {
         const float c = std::cos(board.yaw);
         const float s = std::sin(board.yaw);
 
         const Vec2 right{c, s};
-        const Vec2 fwd{-s, c};
 
-        const float legHalf = board.glyphHeight * 0.055f;
+        const float legHalf = board.glyphHeight * 0.050f;
 
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 2; ++i) {
             const float su = (i & 1) ? 1.0f : -1.0f;
-            const float sv = (i & 2) ? 1.0f : -1.0f;
 
             BoardBox leg;
-            leg.center     = Vec2{right.x * half * su + fwd.x * half * sv,
-                                  right.y * half * su + fwd.y * half * sv};
+            leg.center     = Vec2{board.origin.x + right.x * half * su,
+                                  board.origin.y + right.y * half * su};
             leg.base       = 0.0f;
             leg.height     = board.bandTop + pad + railThick;
             leg.halfExtent = Vec2{legHalf, legHalf};
@@ -305,9 +371,10 @@ Board GenerateBoard(uint64_t seed, const City& city) {
         }
     }
 
-    app::Log("board: glyph %.0fm, face %.0fm wide, band %.0f-%.0fm, %zu boxes, rises at %.1fs",
-             board.glyphHeight, board.width, board.bandBottom, board.bandTop, board.boxes.size(),
-             board.riseStart);
+    app::Log("board: glyph %.0fm, face %.0fm wide, band %.0f-%.0fm at (%.0f, %.0f), "
+             "%zu boxes, rises at %.1fs",
+             board.glyphHeight, board.width, board.bandBottom, board.bandTop, board.origin.x,
+             board.origin.y, board.boxes.size(), board.riseStart);
 
     return board;
 }

@@ -257,7 +257,10 @@ World Generate(const app::Settings& settings, uint64_t seed) {
     float                   worst = 0.0f;
     const std::vector<Peak> peaks = GenerateClosedRange(&world.horizon, &worst);
 
-    world.horizonMesh = BuildHorizon(peaks, world.seed);
+    // One height field rather than 216 overlapping solids: see the Shell comment in horizon.h for
+    // why the range is built this way.
+    const Shell shell = BuildShell(peaks, world.horizon, world.seed);
+    world.horizonMesh = BuildHorizon(shell, world.seed);
 
     // Spec 7.1: the missile comes in over the mountains, and is seen doing it. Both halves are
     // statements about the entry point's elevation as seen from the camera — one measured against
@@ -355,9 +358,11 @@ World Generate(const app::Settings& settings, uint64_t seed) {
              world.detonation.capRadius,
              std::sqrt(world.detonation.wind.x * world.detonation.wind.x +
                        world.detonation.wind.z * world.detonation.wind.z));
-    app::Log("world: terrain %zu verts / %zu tris, horizon %zu peaks %.0f-%.0fm, margin %.2f deg",
+    app::Log("world: terrain %zu verts / %zu tris, horizon %zu peaks %.0f-%.0fm on a %dx%d field, "
+             "margin %.2f deg",
              world.terrainMesh.vertices.size(), world.terrainMesh.indices.size() / 3, peaks.size(),
-             world.horizon.minHeight, world.horizon.maxHeight, worst / core::kDegToRad);
+             world.horizon.minHeight, world.horizon.maxHeight, shell.bearings, shell.rings,
+             worst / core::kDegToRad);
 
     return world;
 }

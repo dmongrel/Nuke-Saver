@@ -39,8 +39,9 @@ Revisions:
 | M6b Auto quality | done | `1af00ea` | The controller driven by frame-time lists across every threshold it has |
 | M6c Board and camera rework | done | `1af00ea` | Board captured at phase 2 and mid-countdown; camera elevation checked over 400 seeds |
 | M6d Missile rework | done | `01a4d52` | 388 checks; aiming mutation-tested three ways; captured at twilight, noon and night |
-| M6e Cast shadows | this commit | | 402 checks; validation clean; captured at noon, morning and mid-gather; the quality lever walked end to end |
-| M6f Preview stills, README, acceptance pass | next | | |
+| M6e Cast shadows | done | `72e305f` | 402 checks; validation clean; captured at noon, morning and mid-gather; the quality lever walked end to end |
+| M6f Horizon as a height field | this commit | | 404 checks; the coverage check now runs against the surface that ships; mountain-band speckle measured before and after |
+| M6g Preview stills, README, acceptance pass | next | | |
 
 ### Deferred verification
 
@@ -255,6 +256,15 @@ Exit: a full cycle runs end to end and loops cleanly. A14 passes.
   board and the fireball all reach a shaded surface. The bias is slope-scaled at the caster and
   offset along the normal at the receiver, which is what keeps acne and peter-panning from trading
   places. Map size is spec 11.2's fourth lever, so it does not move on the first step down.
+- The horizon range rebuilt as a height field (spec 6.3), from review after M6e. **Done.** The
+  original construction stood 216 cones on the ground and let them interpenetrate, which is how
+  the ring closes -- widthFactor is 2.7, so overlapping is the mechanism rather than an accident.
+  Every one of those intersections was two faces meeting at a shallow angle twenty kilometres
+  away, inside the fifty metres a standard projection can resolve out there, and the range
+  shimmered along every seam. The replacement is one single-valued field on a polar grid, taken as
+  the max of the same profile the coverage check uses, with reach and lift jittered upward only so
+  the built surface is never below the surface the check was run against. Smooth shaded, because
+  on a height field the facets are the sampling grid rather than the rock.
 - Bake preview stills from a real run and wire the cross-fade, replacing M1's black. This is the
   only part of preview still outstanding; the behavior was signed off at M1.
 - Rewrite `README.md`.

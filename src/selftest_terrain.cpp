@@ -269,10 +269,11 @@ void TestHorizon() {
         Check(!ClosesHorizon(gapped, params), "a missing arc is reported as open");
     }
 
-    // The mesh. Its base must be on the ground: an earlier version lifted every corner, which
-    // left the solid open underneath and showed as horizontal shelves of sky beneath the front
-    // row from a camera standing on the plain.
-    const Mesh mesh = BuildHorizon(peaks, params.seed);
+    // The mesh, and the height field it is triangulated from. Its base must be on the ground: an
+    // earlier version lifted every corner, which left the solid open underneath and showed as
+    // horizontal shelves of sky beneath the front row from a camera standing on the plain.
+    const Shell shell = BuildShell(peaks, params, params.seed);
+    const Mesh  mesh  = BuildHorizon(shell, params.seed);
     Check(!mesh.empty(), "the horizon mesh is not empty");
     Check(mesh.indices.size() % 3 == 0, "the horizon index count is a whole number of triangles");
 
@@ -295,39 +296,61 @@ void TestHorizon() {
     }
     Check(!degenerate, "no horizon triangle is degenerate");
 
-    // Outward-facing. This mesh is the one thing in the world that is back-face culled, so an
-    // inward normal turns a peak inside out.
-    //
-    // Checked one peak at a time, because the bases of a real range overlap by design — at
-    // widthFactor 1.9 each one reaches nearly two neighbours deep, so a face of one peak is
-    // routinely closer to another peak's centre than to its own, and "the nearest centre" is not
-    // the peak the face belongs to.
+    // Upward-facing. The range is the one thing in the world that is back-face culled, and a
+    // height field's whole claim is that it has no underside: every triangle in it is the top of
+    // the surface, so every winding has to come out with the normal above the horizontal. One
+    // face listed the other way round turns a hillside into a hole.
     {
-        bool outward = true, everySeed = true;
+        bool upward = true, everySeed = true;
         for (uint64_t s = 1; s <= 40; ++s) {
             std::vector<Peak> one(1);
             one[0].center = Vec2{6000.0f, -2500.0f};
             one[0].height = 2800.0f;
             one[0].radius = 900.0f;
 
-            const Mesh solo = BuildHorizon(one, s);
-            if (solo.indices.size() % 3 != 0) everySeed = false;
+            HorizonParams solo = params;
+            solo.peaksPerRow   = 24;
 
-            for (size_t t = 0; t < solo.indices.size() / 3; ++t) {
-                const Vec3 n = FaceNormal(solo, t);
+            const Mesh mesh1 = BuildHorizon(BuildShell(one, solo, s), s);
+            if (mesh1.indices.size() % 3 != 0 || mesh1.empty()) everySeed = false;
 
-                const Vec3& a = solo.vertices[solo.indices[t * 3 + 0]].position;
-                const Vec3& b = solo.vertices[solo.indices[t * 3 + 1]].position;
-                const Vec3& c = solo.vertices[solo.indices[t * 3 + 2]].position;
-
-                const Vec2 from{(a.x + b.x + c.x) / 3.0f - one[0].center.x,
-                                (a.z + b.z + c.z) / 3.0f - one[0].center.y};
-
-                if (Dot(Vec2{n.x, n.z}, from) <= 0.0f) outward = false;
+            for (size_t t = 0; t < mesh1.indices.size() / 3; ++t) {
+                if (FaceNormal(mesh1, t).y <= 0.0f) upward = false;
             }
         }
         Check(everySeed, "a single peak meshes into whole triangles for every seed");
-        Check(outward, "every horizon face points away from the peak it belongs to");
+        Check(upward, "every horizon face points up, so the range has no underside to cull away");
+    }
+
+    // The surface that ships closes the horizon, not just the closed form the generator checked.
+    //
+    // These are two different questions and the file they live in has been wrong about it before:
+    // the check is a closed form over analytic cones, and what gets drawn is a triangulated height
+    // field built from them. The one holds for the other only because the field is never below the
+    // profile the check assumed — the shell widens reach and raises lift, and never the reverse.
+    // This is that claim, measured rather than asserted.
+    {
+        HorizonParams settled = SizeHorizon(41ull, 900.0f, 3400.0f);
+        settled.seed          = 41ull;
+
+        float                   margin = 0.0f;
+        const std::vector<Peak> closed = GenerateClosedRange(&settled, &margin);
+        const Shell             built  = BuildShell(closed, settled, settled.seed);
+
+        float shellMargin = 0.0f;
+        Check(ShellClosesHorizon(built, settled, &shellMargin),
+              "the height field that ships closes the horizon, not only the cones behind it");
+
+        // Sabotage, so the check above is known to be able to fail. Flattening an arc of the field
+        // is the same failure a missing arc of peaks would produce, applied to the thing drawn.
+        Shell gapped = built;
+        for (int j = 0; j < gapped.rings; ++j) {
+            for (int i = 0; i < gapped.bearings / 12; ++i) {
+                gapped.height[static_cast<size_t>(j) * gapped.bearings + i] = 0.0f;
+            }
+        }
+        Check(!ShellClosesHorizon(gapped, settled),
+              "a flattened arc of the height field is reported as open");
     }
 
     // Finally, end to end: the world generator has to settle on a range that passes, for any

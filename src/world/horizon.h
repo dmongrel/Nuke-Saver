@@ -85,7 +85,51 @@ bool ClosesHorizon(const std::vector<Peak>& peaks, const HorizonParams& params,
 // `worstElevation`, if given, receives the final coverage margin in radians.
 std::vector<Peak> GenerateClosedRange(HorizonParams* params, float* worstElevation = nullptr);
 
-Mesh BuildHorizon(const std::vector<Peak>& peaks, uint64_t seed);
+// The range as the surface it is actually built as: one single-valued height field on a polar
+// grid, rather than a pile of overlapping solids.
+//
+// The original construction stood 216 cones on the ground and let them interpenetrate, which is
+// how the ring closes -- widthFactor is 2.7, so every peak overlaps its neighbours on purpose.
+// The cost was that every one of those intersections is two faces meeting at a shallow angle
+// twenty kilometres away, and a depth buffer cannot separate them: with a half-metre near plane
+// and a sixty-kilometre far plane, a standard projection resolves about fifty metres at that
+// distance. The range shimmered along every seam.
+//
+// A height field has no interior surfaces to fight. The fix is structural rather than a matter of
+// precision, which is why it survives whatever the projection does later.
+struct Shell {
+    int   bearings    = 0;  // angular samples around the full circle
+    int   rings       = 0;
+    float innerRadius = 0.0f;
+    float radialStep  = 0.0f;
+
+    // rings * bearings, ring-major. Height above the ground plane at each grid point.
+    std::vector<float> height;
+
+    float RingRadius(int ring) const { return innerRadius + radialStep * static_cast<float>(ring); }
+    float outerRadius() const { return RingRadius(rings - 1); }
+
+    // Bilinear, in the grid's own polar coordinates, and zero outside the annulus. This is the
+    // surface the mesh is triangulated from, so anything asking how tall the range is at a point
+    // should ask here rather than re-deriving it from the peaks.
+    float HeightAt(float x, float z) const;
+};
+
+// The height field for a set of peaks. The height is the max of the same PeakProfile the coverage
+// check uses, so the two stay one definition, plus roughness that only ever adds -- a surface that
+// is never below the profile the check assumed is a surface the check is still valid for.
+Shell BuildShell(const std::vector<Peak>& peaks, const HorizonParams& params, uint64_t seed);
+
+Mesh BuildHorizon(const Shell& shell, uint64_t seed);
+
+// The same question SilhouetteElevation answers, asked of the built shell instead of the peaks it
+// came from. Marching a height field is far slower than the closed form, so this is not what the
+// generator uses to check its own work -- it is what proves the closed form is conservative for
+// the thing that actually ships.
+float ShellElevation(const Shell& shell, const core::Vec3& eye, float bearing);
+
+bool ShellClosesHorizon(const Shell& shell, const HorizonParams& params,
+                        float* worstElevation = nullptr);
 
 }  // namespace world
 

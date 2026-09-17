@@ -240,13 +240,24 @@ has to be cheap enough that it costs nothing to keep on screen for the whole cyc
 
 **Far-field mountains**
 
-- A ring of low-polygon triangular peaks surrounds the basin beyond the playable terrain,
-  standing far enough out to read as distant range rather than as basin rim.
-- Each peak is a simple triangular form — a few faces, no displacement, no LOD. They are
-  silhouette, not geography.
+- A ring of peaks surrounds the basin beyond the playable terrain, standing far enough out to
+  read as distant range rather than as basin rim. They are silhouette, not geography: no
+  displacement, no LOD.
 - Height, width, spacing and radial distance are randomised per cycle from the seed, with
   overlapping rows at different distances so the range has depth rather than reading as a
   fence.
+- The range MUST be built as a single-valued height field over the ground plane — one surface
+  with no interior faces — rather than as a pile of overlapping solids. Overlapping is how the
+  ring closes, so solids would intersect everywhere, and two faces meeting at a shallow angle
+  twenty kilometres out is a depth fight no buffer can win: a standard projection with a
+  half-metre near plane resolves about fifty metres at that range. The field removes the
+  coincident surfaces rather than trying to out-precision them.
+- The range MUST be smooth shaded. Flat shading was right when a peak's seven facets *were* its
+  detail; on a height field it draws the sampling grid instead, and a regular polar grid on a
+  mountain reads as a wireframe.
+- Whatever the field is built from, it MUST be nowhere below the profile the coverage check
+  assumes, and the check MUST be verifiable against the surface that ships rather than only
+  against the construction behind it.
 - The ring MUST completely close the horizon from every point on the camera orbit, at every
   shot height in the library. No gap may show sky meeting flat ground.
 - Peaks MUST be tall enough that the tallest building never breaks the skyline behind them
@@ -886,6 +897,7 @@ confirmation it took.
 | A31 | Frame at noon and at morning | Buildings cast shadows onto the desert and onto each other; each shadow is attached to the building casting it; no acne on lit faces |
 | A32 | Frame during phase 8 | The cloud casts onto the desert and onto the settled dust disc beneath it; the disc is not the brightest thing in the frame |
 | A33 | Run pinned at each quality level | Shadow map is 2048², 2048², 1024², 512²; level 1 matches level 0 |
+| A34 | Two consecutive frames, mountain band only | No speckle along the ridges: the range is one surface, so no pixel flips between two faces as the camera creeps |
 
 ## 15. Out of scope
 

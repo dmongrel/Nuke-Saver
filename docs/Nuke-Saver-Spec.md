@@ -1,6 +1,6 @@
 # nuke-saver: Build Specification
 
-Status: draft, third revision — more specs to follow
+Status: draft, fourth revision — more specs to follow
 Target: Windows 10 1903+ / Windows 11, x86-64
 Deliverable: `nuke-saver.scr`, a native Win32 screen saver rendering with Vulkan
 
@@ -32,6 +32,13 @@ Revisions:
   for the whole cycle and is never static (section 11.1). This forced a change to the countdown
   board: a single fixed face would turn away from an orbiting camera mid-countdown, so the board
   now carries four faces (section 7.6).
+- 2026-09-17: owner direction, fourth pass. Q1, Q5 and Q6 resolved. **Twilight** is the default
+  time of day (section 10). The horizon is closed by a **far-field impostor** of random
+  triangular mountains, and the sky carries **stars and one celestial body — sun or moon — that
+  is also the scene's key light** (section 6.3). The countdown board shows the time and nothing
+  else, and is art-directed as **diegetic title typography**: numerals that belong to the city
+  the way film credits are built into a shot (section 7.6). Weather is settled as **none** —
+  no cloud layer, no precipitation (section 15).
 
 ---
 
@@ -53,7 +60,8 @@ NOT present its output as predictive of anything. It is a light show.
 
 | Source | Describes | Status |
 |---|---|---|
-| Owner direction, 2026-09-17 (third pass) | World-space countdown board, dispersing mushroom cloud | **Authoritative** |
+| Owner direction, 2026-09-17 (fourth pass) | Twilight default, mountain horizon impostor, skybox with stars and sun/moon key light, diegetic countdown typography, no weather | **Authoritative** |
+| Owner direction, 2026-09-17 (third pass) | World-space countdown board, dispersing mushroom cloud, orbiting camera | Authoritative where the fourth pass is silent |
 | Owner direction, 2026-09-17 (second pass) | Growth, countdown, missile, triangle destruction and triangle mushroom, colour rules, four times of day | Authoritative where the third pass is silent |
 | Owner direction, 2026-09-17 (first pass) | Screen saver, desert city, nuclear detonation, C++, Vulkan, real-time, non-physical | Authoritative where later passes are silent |
 | `main.cpp` (commit `911badf`) | Win32 screensaver skeleton: `wWinMain`, `/s` `/p` `/c`, black window | Valid scaffolding. Section 9 extends it. |
@@ -65,12 +73,17 @@ NOT present its output as predictive of anything. It is a light show.
 
 ## 3. Scope of this revision
 
-Specified here: the run cycle and its eleven phases, the world, colour authoring, the
+Specified here: the run cycle and its eleven phases, the world and its sky, colour authoring, the
 rendering approach, the screensaver modes, settings, the performance budget, failure behavior
 and the build.
 
 Deferred, listed so nobody designs around their absence: audio; HDR display output; any
-second detonation type; weather or wind beyond a constant drift direction.
+second detonation type.
+
+Weather is no longer deferred — it is **resolved as none** (section 15). The only atmospheric
+effect in the project is the distance haze that the horizon range and terrain already use. Wind
+is a single constant drift direction per cycle, used by the cloud and the smoke, and nothing
+more.
 
 ## 4. Run cycle
 
@@ -82,7 +95,7 @@ drawn per cycle, uniformly, from the stated range.
 | # | Phase | Duration | What the viewer sees |
 |---:|---|---|---|
 | 0 | Empty land | 5–8 s *random* | Bare desert basin. No city, no marks on the ground. The camera is already moving. |
-| 1 | Growth | 5–10 s *random* | 500 buildings rise out of the ground, staggered, until the city stands complete. The countdown board rises with them, last. See 6.4. |
+| 1 | Growth | 5–10 s *random* | 500 buildings rise out of the ground, staggered, until the city stands complete. The countdown board rises with them, last. See 6.5. |
 | 2 | Settle | 2–3 s *random* | The finished city, still, the board dark. Nothing happens. This beat exists so the countdown lands on a stable frame. |
 | 3 | Countdown | exactly 5 s | The board lights: `00:00:05` counting to `00:00:00`, throwing its own light across the rooftops. See 7.6. |
 | 4 | Missile | 2.5–4 s *random* | A missile enters frame from off screen and runs down to the city centre, trailing exhaust. The board holds at `00:00:00`. |
@@ -178,9 +191,13 @@ mismatching reads as a bug, not as variety.
 
 ### 5.4 Time of day
 
-Four settings, selectable or random per cycle (section 10). Each MUST change sun angle, sun
-colour, sky gradient and base exposure together — a time of day that only tints the sky is not
-done.
+Four settings, selectable or random per cycle (section 10). **Twilight is the default.** It
+gives the fireball its best contrast, puts the city into silhouette, and is the only setting
+where the sky itself carries colour worth looking at for 25 seconds of empty land.
+
+Each MUST change key-light angle, key-light colour, sky gradient, star visibility and base
+exposure together — a time of day that only tints the sky is not done. The celestial body drawn
+on the skybox and the direction of the key light come from one value (6.3).
 
 | | Sun elevation | Sun colour | Sky | Notes |
 |---|---:|---|---|---|
@@ -212,7 +229,54 @@ and anything it cannot carry inside its own resource section does not exist.
 - The floor MUST darken and scorch inside the blast radius during phase 6, and MUST stay
   scorched through phase 10.
 
-### 6.3 The city
+### 6.3 Horizon and sky
+
+The basin is 8 km across and the camera orbits it. Something has to close the horizon, and it
+has to be cheap enough that it costs nothing to keep on screen for the whole cycle.
+
+**Far-field mountains**
+
+- A ring of low-polygon triangular peaks surrounds the basin beyond the playable terrain,
+  standing far enough out to read as distant range rather than as basin rim.
+- Each peak is a simple triangular form — a few faces, no displacement, no LOD. They are
+  silhouette, not geography.
+- Height, width, spacing and radial distance are randomised per cycle from the seed, with
+  overlapping rows at different distances so the range has depth rather than reading as a
+  fence.
+- The ring MUST completely close the horizon from every point on the camera orbit, at every
+  shot height in the library. No gap may show sky meeting flat ground.
+- Peaks MUST be tall enough that the tallest building never breaks the skyline behind them
+  from a low shot, which is what would give the impostor away.
+- They are lit by the same sun or moon as everything else, and MUST fade into the horizon haze
+  with distance so the range reads as atmospheric rather than as a painted backdrop.
+- They are **static scenery**: not fragmented by the blast, not lit dynamically by the fireball
+  beyond a flat distance-attenuated term, and never simulated.
+
+**Sky**
+
+- A skybox, drawn behind everything, carrying a gradient from the time-of-day table in 5.4.
+- **Stars** at twilight and night, as points on the skybox, with brightness scaled by ambient
+  so they emerge as the sky darkens. They MUST be fixed to the sky, not to the camera, so the
+  orbit moves past them.
+- **One celestial body** is drawn, and it is the scene's key light:
+
+| Time of day | Body | Role |
+|---|---|---|
+| Morning | Sun, low | Key light, warm |
+| Noon | Sun, high | Key light, neutral |
+| Twilight | Sun, at or just below the horizon | Key light, deep orange-red |
+| Night | Moon | Key light, dim and cool |
+
+- The body's position on the skybox and the direction of the scene's key light MUST be derived
+  from the same value. A sun drawn in one place while shadows fall from another is a defect,
+  and the long shadows of morning and twilight make it obvious.
+- The body MUST be emissive per 5.1 and MUST bloom.
+- At night the moon MUST be bright enough to read as the light source, and MAY be drawn with
+  simple surface variation. Phase is fixed; it does not need to be modelled.
+- No weather. No cloud layer, no precipitation, no fog beyond the distance haze that the
+  mountains and terrain already use (section 15).
+
+### 6.4 The city
 
 **500 buildings, hard limit for this revision.** Each is a rectangular or square box — nothing
 else. No setbacks, no crowns, no roof furniture, no masts. The silhouette comes from the
@@ -237,7 +301,7 @@ Requirements:
   random on/off state (section 5.4).
 - Two consecutive cycles sharing a skyline is a defect.
 
-### 6.4 Growth (phase 1)
+### 6.5 Growth (phase 1)
 
 - Each building is assigned a start time spread across the phase duration, weighted so the
   centre starts first and the outskirts follow. The city grows outward.
@@ -341,15 +405,32 @@ no march.
 A physical object in the world, not an overlay. It is built with the city, it lights the city,
 and the blast takes it apart with everything else.
 
+**Intent**
+
+The reference is diegetic film typography — the title sequences where the words are built into
+the shot, standing among the buildings at the scale of the buildings, lit by the scene's own
+light, with the city passing in front of them as the camera moves. The countdown should read
+that way: not signage the city happens to contain, but numerals that belong to the shot.
+
+This is an art-direction constraint with teeth. It means the digits are **monumental** rather
+than sign-sized, they sit **in** the skyline rather than above it, and the camera's motion
+parallaxes them against the buildings. It also means partial occlusion is not a bug.
+
 **Form**
 
-- A freestanding display board on a lattice mast at the city centre, its face carrying eight
-  7-segment glyphs reading `HH:MM:SS` — six digits and two colons.
-- The board MUST stand clear of the skyline: its base is at or above the height of the tallest
-  building, so no building ever occludes the digits.
-- Nominal face 140 m wide by 40 m tall. Scale it with the city's extent rather than fixing it, so
-  a small city does not get a billboard twice its width.
-- Segments are **geometry**, not a texture: extruded bars on a recessed dark board face.
+- A freestanding structure at the city centre, its faces carrying eight 7-segment glyphs
+  reading `HH:MM:SS` — six digits and two colons, and nothing else. No name, no marking, no
+  branding.
+- Scale is monumental: glyph height MUST be comparable to the tallest buildings, so the digits
+  read as part of the skyline rather than as a board mounted above it. Scale with the city's
+  extent rather than fixing dimensions, so a small city does not get numerals twice its width.
+- Foreground buildings MAY partially occlude the glyphs, and as the camera orbits they SHOULD —
+  that parallax is the effect. The requirement is only that all eight glyphs stay *identifiable*
+  throughout phases 3 and 4, not that they stay unobstructed.
+- Segments are **geometry**, not a texture: extruded bars set into a recessed dark face, deep
+  enough that they self-shadow and catch the key light at a grazing angle.
+- The supporting structure MUST be minimal — an open lattice, or nothing visible at all. A
+  heavy frame turns monumental typography back into a billboard.
 
 **Orientation**
 
@@ -369,7 +450,7 @@ not with rotation.
 
 **Behavior**
 
-- Rises last during phase 1 (6.4), dark.
+- Rises last during phase 1 (6.5), dark.
 - Dark through phase 2.
 - Lights at the start of phase 3 showing `00:00:05`, stepping to `00:00:00` once per second.
 - Holds `00:00:00`, still lit, through phase 4.
@@ -503,7 +584,7 @@ run correctly against an empty registry key.
 | Value | Type | Default | Meaning |
 |---|---|---|---|
 | `Quality` | DWORD | 0 | 0 = auto (11.2), 1 = low, 2 = medium, 3 = high |
-| `TimeOfDay` | DWORD | 0 | 0 = random per cycle, 1 = morning, 2 = noon, 3 = twilight, 4 = night |
+| `TimeOfDay` | DWORD | 3 | 0 = random per cycle, 1 = morning, 2 = noon, **3 = twilight (default)**, 4 = night |
 | `CameraMode` | DWORD | 0 | 0 = random shot per cycle, 1–4 = pin to one shot type |
 
 The `/c` dialog MUST expose these three and nothing else, and MUST be a plain Win32 dialog
@@ -624,12 +705,17 @@ network.
 | A17 | Frame at mid-phase 8 | Recognisable mushroom, cap rolling, fragments still carrying building colours |
 | A18 | Sample 50 building colours | Spread consistent with ±10% HSV variation; no two adjacent buildings identical |
 | A19 | Run each `TimeOfDay` setting | Sun angle, sun colour, sky and exposure all differ; windows brightest at night |
-| A20 | Board legibility, every shot type, 16:9 and 21:9 | All eight glyphs readable through phases 3–4 from every point on the orbit arc; no building occludes a readable face |
+| A20 | Board legibility, every shot type, 16:9 and 21:9 | All eight glyphs identifiable through phases 3–4 from every point on the orbit arc, partial occlusion permitted |
 | A21 | Board light at night | Rooftops beneath the board visibly lit amber; board is the dominant city light |
 | A22 | Board yaw across a cycle | Fixed after phase 1; no per-frame rotation toward the camera; all four faces agree every frame |
 | A23 | Frame-step phase 9 | Stem empties before the cap; release is staggered, never all at once |
 | A24 | Frame at end of phase 9 | Cloud gone, majority of fragments at rest, debris field over the scorched footprint |
 | A25 | Sample camera position every second of a full cycle | Always moving; no frame-to-frame repeat; total arc 30–90°; direction varies between cycles |
+| A26 | Orbit a full arc at every shot height, all four times of day | Mountain range closes the horizon at every point; no gap of sky meeting flat ground; no building breaks the skyline behind the range |
+| A27 | Compare drawn sun/moon position to shadow direction | Shadows fall consistently with the body on the skybox, checked at morning and twilight where shadows are longest |
+| A28 | Night and twilight | Stars visible, fixed to sky rather than camera, brightness scaling with ambient; moon reads as the key light at night |
+| A29 | Board glyph scale against skyline | Glyph height comparable to the tallest buildings; digits read as part of the skyline, foreground buildings parallax across them as the camera orbits |
+| A30 | Fresh install, empty registry | Runs at twilight |
 
 ## 15. Out of scope
 
@@ -638,16 +724,17 @@ Configuration beyond section 10. Physically accurate anything. Real-world geogra
 identifiable real city. Ray tracing extensions. Non-Windows platforms. Any 32-bit build.
 Rigid-body collision between fragments — they collide with the ground and nothing else.
 
+**Weather.** No cloud layer, no rain, no snow, no dust storms, no wind gusts. The sky is a
+gradient, stars and one celestial body. Atmosphere is distance haze and nothing else. Wind exists
+only as a single constant drift direction per cycle for the mushroom cloud and the smoke. This is
+a deliberate simplification: a volumetric cloud layer would cost more than the entire fragment
+simulation, and a clear sky suits a desert.
+
 ## 16. Open questions
 
-- Q1: Default time of day when `TimeOfDay` is not random. Twilight gives the fireball the best
-  contrast; night gives the flash the most violence and shows the countdown board at its best.
 - Q3: Preview stills get baked from a real run, making them an M6 task. Confirm that preview
   showing black until then is acceptable.
-- Q5: Is a fixed 8 km basin enough at the widest camera, or does the horizon need a cheap
-  far-field impostor?
-- Q6: Should the countdown board carry anything besides the time — a name, a marking — or stay
-  purely a readout?
 
-Q2 (countdown placement) and Q4 (cloud dispersal) were resolved in revision 3. Numbering is kept
-so earlier discussion still refers to the right thing.
+Resolved: Q2 (countdown placement) and Q4 (cloud dispersal) in revision 3; Q1 (default time of
+day — twilight), Q5 (horizon impostor — mountain range, 6.3) and Q6 (board content — time only,
+7.6) in revision 4. Numbering is kept so earlier discussion still refers to the right thing.

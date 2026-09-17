@@ -1,6 +1,6 @@
 # nuke-saver: Implementation Plan
 
-Status: draft, second revision
+Status: draft, third revision
 Companion to [`Nuke-Saver-Spec.md`](Nuke-Saver-Spec.md), which owns behavior. This document
 owns sequencing, module layout and risk.
 
@@ -15,12 +15,15 @@ Revisions:
   to world geometry with four faces and its own light, which moves it out of the post chain and
   into M3. A disperse phase is added to M4. The continuous camera orbit makes the framing solver
   a real piece of work rather than a lookup, and it lands in M3 with the shot library.
+- 2026-09-17: updated against spec revision 4. M3 absorbs the horizon range and the skybox, and
+  the countdown board becomes skyline-scale typography rather than signage. M3 is now the biggest
+  milestone in the plan and carries a suggested split.
 
 ---
 
 ## 1. Shape of the work
 
-The spec describes a nine-phase sequence. Building it in phase order would mean the fragment
+The spec describes an eleven-phase sequence. Building it in phase order would mean the fragment
 simulation — the system everything after phase 6 depends on, and the one most likely to
 force a redesign — lands two thirds of the way through. It moves up instead.
 
@@ -100,21 +103,32 @@ scene.
 - Noise library: value/gradient fBm, ridged, curl. Written once, shared by terrain, fragment
   swirl and particles.
 - Terrain generation, chunked LOD, sand shading.
+- Horizon range: randomised low-poly triangular peaks in overlapping rows, distance haze, and
+  the coverage check that no gap shows at any orbit point or shot height (spec 6.3).
+- Skybox: gradient, stars fixed to the sky, and the one celestial body — sun or moon — drawn
+  from the same value that sets the key-light direction (spec 6.3). Deriving both from one value
+  is the whole point; two independent settings will drift and A27 will catch it late.
 - City generator: extent, roads, lot subdivision to exactly 500 lots, box dimensions.
 - Instanced box rendering from one unit cube, with shader-generated windows.
 - The colour system: per-instance HSV variation (spec 5.2), base palette, and all four times
-  of day (spec 5.4).
-- Sun, sky, shadow cascades.
-- Growth animation (spec 6.4).
-- Countdown board: mast and four-faced geometry, procedural 7-segment bars from a digit value,
-  its emissive material and its light on the rooftops (spec 7.6). The digits are static at this
-  milestone; phase timing is M5's job.
+  of day (spec 5.4), with twilight as the default.
+- Key light and shadow cascades.
+- Growth animation (spec 6.5).
+- Countdown board: four-faced monumental geometry at skyline scale, procedural 7-segment bars
+  from a digit value, recessed faces deep enough to self-shadow, emissive material and its light
+  on the rooftops (spec 7.6). The digits are static at this milestone; phase timing is M5's job.
+  Getting the scale right against the skyline is the work here, not the geometry.
 - Camera orbit, the shot library, and the framing solver (spec 11.1) — radius sized from the
   phase 8 cloud extent, then checked against board legibility, missile visibility and city fit
   across the whole arc.
 
-Exit: phases 0–2 are shippable on their own — empty land, a city that grows under an orbiting
-camera, a board standing over it. A5, A6, A13, A18, A19, A20, A21, A22, A25 pass.
+Exit: phases 0–2 are shippable on their own — empty land under a closed horizon, a city that
+grows beneath an orbiting camera, monumental numerals standing in its skyline. A5, A6, A13, A18,
+A19, A20, A21, A22, A25, A26, A27, A28, A29, A30 pass.
+
+M3 is now the largest milestone by some distance. If it needs splitting, the seam is between the
+world (terrain, horizon, sky, city, colour) and the presentation (board, camera, framing solver);
+the first half is shippable on its own as an empty desert that looks right.
 
 ### M4 — Fragments
 
@@ -199,8 +213,10 @@ sim/
 world/
   noise.cpp           fBm, ridged, curl
   terrain.cpp         heightfield, chunking, LOD
+  horizon.cpp         far-field triangular peaks, coverage check
+  sky.cpp             skybox gradient, stars, sun/moon, key-light direction
   city.cpp            roads, lots, 500 boxes, growth schedule
-  board.cpp           countdown mast, four faces, procedural 7-segment geometry
+  board.cpp           countdown structure, four faces, procedural 7-segment geometry
   palette.cpp         base colours, per-instance HSV variation, times of day
 shaders/              GLSL, compiled to SPIR-V by the Makefile
 third_party/          volk, VMA
@@ -214,7 +230,7 @@ third_party/          volk, VMA
 |---:|---|---|---|
 | R1 | 125,000 fragments will not hold 60 FPS | They are simulated, sorted against nothing, and drawn every frame from phase 6 to phase 9 — over half the cycle | M4 exists to answer this before anything depends on it. Fragments-per-building is the first quality lever (spec 11.2), giving a 5× range without touching building count. |
 | R2 | The gather reads as a gimmick, not a mushroom | Fragments converging on an analytic shape can easily look like a mesh being assembled rather than a cloud forming | Spring-damper with per-fragment variation and continuous curl swirl, never a direct lerp to target. Convergence spread over most of a 30–45 s phase. Budget tuning time in M4. |
-| R3 | Growth, countdown and missile are timing, not code | Each is straightforward to implement and easy to get subtly wrong — a city that grows too fast, a countdown that drifts, a missile that arrives off screen | Exact-duration requirements and visibility rules are in the spec (6.4, 7.1, 7.6) with tests (A13, A14). Treat them as tuning tasks with acceptance criteria, not as features that are done when they compile. |
+| R3 | Growth, countdown and missile are timing, not code | Each is straightforward to implement and easy to get subtly wrong — a city that grows too fast, a countdown that drifts, a missile that arrives off screen | Exact-duration requirements and visibility rules are in the spec (6.5, 7.1, 7.6) with tests (A13, A14). Treat them as tuning tasks with acceptance criteria, not as features that are done when they compile. |
 | R8 | The framing solver is over-constrained | One orbiting camera, no cuts, must fit a growing city, keep an eight-glyph readout legible, catch a missile, and frame a cloud several times the city's width — across a 30–90° arc | Solve radius from the widest constraint (phase 8) and treat the rest as checks, not as inputs. The board's four faces and its adjustable placement are the slack in the system; the camera path is not. If the solver still cannot converge, the board gets larger or moves, before anything touches the orbit. |
 | R4 | Auto-exposure oscillation | A feedback loop driven by a source spanning four orders of magnitude will hunt if damping is wrong | Asymmetric rates specified, not tuned late. Test the phase 5→6 transition specifically. |
 | R5 | MinGW plus `-static` plus Vulkan | Static runtime alongside a dynamically loaded loader can surface link-order and TLS problems | M0 proves the whole chain before a line of renderer code exists. |

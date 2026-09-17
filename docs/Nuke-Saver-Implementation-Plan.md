@@ -38,7 +38,7 @@ Revisions:
 | M6a Particles | done | `1af00ea` | 380 checks; all five systems captured in their own phases |
 | M6b Auto quality | done | `1af00ea` | The controller driven by frame-time lists across every threshold it has |
 | M6c Board and camera rework | done | `1af00ea` | Board captured at phase 2 and mid-countdown; camera elevation checked over 400 seeds |
-| M6d Missile rework | this commit | | 386 checks; aiming mutation-tested two ways. **Not yet seen on screen** -- see below |
+| M6d Missile rework | this commit | | 388 checks; aiming mutation-tested three ways; captured at twilight, noon and night |
 | M6e Preview stills, README, acceptance pass | next | | |
 
 ### Deferred verification
@@ -237,25 +237,25 @@ Exit: a full cycle runs end to end and loops cleanly. A14 passes.
   desert at the near edge of the city on the camera's right, laid along the tangent of the city's
   circle, lit at `00:00:05` from the moment it rises. The low shots draw an opening elevation per
   cycle, cubed toward the floor.
-- Missile rework, from review during M6. **Done.** It comes in over the mountains: the entry
-  point is aimed after the camera and the range exist, by lengthening the approach along the
-  bearing and descent angle already drawn until the entry clears the ridge silhouette by two
-  degrees. It decelerates on the way in, so the arrival is still readable over an approach two to
-  seven kilometres long. The airframe is lit rather than emissive -- it is high enough to still
-  be in the key light after the ground has left it -- and the plume is short and dimmed with
-  distance, so the missile is bright without being a bloom bead. Behind it is a thin contrail, an
-  eighth of its old width, lit by the same high-altitude light.
+- Missile rework, from review during M6. **Done.** It comes in over the mountains: after the
+  camera and the range exist, the descent angle is solved so the entry point sits two degrees
+  above the ridge silhouette and inside the frame, and the bearing is walked outward from its
+  random draw only as far as the shot demands. It decelerates on the way in, so the arrival is
+  still readable over an approach of two to four kilometres. The airframe is lit rather than
+  emissive -- it is high enough to still be in the key light after the ground has left it -- and
+  the plume is short and dimmed with distance, so the missile is bright without being a bloom
+  bead. Behind it is a thin contrail, a quarter of its old width and a ninth of its density.
 - Bake preview stills from a real run and wire the cross-fade, replacing M1's black. This is the
   only part of preview still outstanding; the behavior was signed off at M1.
 - Rewrite `README.md`.
 - Full acceptance pass, A1–A19. Size check against 8 MB. A11 soak again.
 
-**Open: the reference machine cannot present.** Since partway through M6d,
-`vkGetPhysicalDeviceSurfaceCapabilitiesKHR` on this machine returns `VK_ERROR_UNKNOWN` (-13) for
-every surface, so no swapchain can be built and every run silently drops to the GDI fallback. The
-selftests and the world generation are unaffected -- they never touch a surface -- but nothing can
-be captured or watched until the graphics driver is reset. The missile rework is therefore verified
-by its numbers and not yet by eye.
+**Resolved during M6d: the reference machine could not present.**
+`vkGetPhysicalDeviceSurfaceCapabilitiesKHR` began returning `VK_ERROR_UNKNOWN` (-13) for every
+surface, so no swapchain could be built and every run dropped silently to the GDI fallback. A
+graphics driver reset cleared it. Worth recording because the symptom was so unhelpful: the log
+said `renderer: vulkan`, the screen saver drew nothing, and the only outward sign was the frame
+rate pinning itself to the fallback's `Sleep(8)`.
 
 Two things came out of chasing it and are worth keeping. The fallback to GDI was silent: the log
 said `renderer: vulkan`, the screen saver drew nothing, and the only outward sign was the frame

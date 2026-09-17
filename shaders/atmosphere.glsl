@@ -113,13 +113,13 @@ float HazeAmount(float distanceMetres) {
 // Flat at ground level so nothing else in the scene changes, and clamped, because past the point
 // where the object is fully sunlit there is no more light to give it.
 float HighAirLight(float altitudeMetres) {
-    return 1.0 + 3.2 * smoothstep(300.0, 3200.0, altitudeMetres);
+    return 1.0 + 4.5 * smoothstep(60.0, 900.0, altitudeMetres);
 }
 
 // The same idea applied to the shadow terminator rather than to the magnitude. A surface at 3 km
 // sees the key light from a direction that is a degree or two higher than the ground does, which
 // is the difference between "the sun has set" and "the sun is setting".
 float HighAirKeyAbove(vec3 keyDirection, float altitudeMetres) {
-    float lift = 0.10 * smoothstep(300.0, 3200.0, altitudeMetres);
+    float lift = 0.12 * smoothstep(60.0, 900.0, altitudeMetres);
     return smoothstep(-0.08, 0.06, keyDirection.y + lift);
 }

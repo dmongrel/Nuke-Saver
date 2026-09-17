@@ -113,11 +113,14 @@ float HighestCameraPoint(const OrbitCamera& camera, float cycleSeconds) {
 // and shrinking the city through the whole first half of the cycle for the sake of three seconds.
 constexpr float kMissileFramedWithin = 0.85f;
 
-// How far out AimOverRidge is allowed to push the entry point. The range starts at 14 km, and an
-// entry point walking out toward it would eventually be born inside a mountain; well short of that
-// the missile is a speck crossing half the sky in three seconds. At 7 km it is out past anything
-// else in the scene and still in front of the range by a factor of two.
-constexpr float kMissileMaxRun = 7000.0f;
+// How far off the centre of the frame the entry point may sit, as a fraction of the camera's
+// horizontal half field of view. Not 1.0: an entry point exactly on the edge is a missile that
+// enters by being clipped.
+constexpr float kMissileOnAxis = 0.80f;
+
+// And how far up it may sit, as a fraction of the vertical field of view measured from where the
+// camera is already looking. Half the field is the top edge exactly; this is just under it.
+constexpr float kMissileFrameTop = 0.44f;
 
 }  // namespace
 
@@ -190,11 +193,14 @@ World Generate(const app::Settings& settings, uint64_t seed) {
         // the camera exists. A distance is the honest statement of the requirement anyway: what
         // has to be in frame is the last stretch of the approach, and how many seconds that takes
         // is a property of the run, not of the shot.
+        // Sized from the bounds of the descent angle rather than from the angle itself, which
+        // is not solved until the aiming below: a shallow approach is the widest arrival and a
+        // steep one is the tallest, so taking the width of the first and the height of the second
+        // frames whichever the solver settles on.
         const float missileFrom = world.cityRadius * kMissileFramedWithin;
-        const core::Vec3 missileAt = world.detonation.MissileWithin(missileFrom);
-        Subject missile;
-        missile.radius = std::sqrt(missileAt.x * missileAt.x + missileAt.z * missileAt.z);
-        missile.height = missileAt.y;
+        Subject     missile;
+        missile.radius = missileFrom * std::cos(Detonation::kDescentMin);
+        missile.height = world.detonation.center.y + missileFrom * std::sin(Detonation::kDescentMax);
 
         // The window is still a pair of times, because the camera moves. It opens at the latest
         // moment the missile can still be that far out, which is the whole phase: a wider window
@@ -253,28 +259,91 @@ World Generate(const app::Settings& settings, uint64_t seed) {
 
     world.horizonMesh = BuildHorizon(peaks, world.seed);
 
-    // Spec 7.1: the missile comes in over the mountains. That is a statement about the entry
-    // point's elevation as seen from the camera, measured against the range behind it — so it is
-    // the last thing settled, after both of those exist. Lengthening the run moves the entry out
-    // and up along a fixed bearing; it does not move the arrival, which is what the framing above
-    // was solved against.
+    // Spec 7.1: the missile comes in over the mountains, and is seen doing it. Both halves are
+    // statements about the entry point's elevation as seen from the camera — one measured against
+    // the range behind it, one against the top of the frame — so this is the last thing settled,
+    // after the camera and the range both exist. Solving the descent angle leaves the bearing and
+    // the run alone, and so leaves the arrival where the framing above was solved for it.
     {
-        const CameraState entry =
-            world.camera.Evaluate(world.timeline.Start(Phase::Missile));
-        const float ridge =
-            SilhouetteElevation(peaks, entry.eye, world.detonation.missileBearing);
+        const CameraState view = world.camera.Evaluate(world.timeline.Start(Phase::Missile));
+        const float ridge = SilhouetteElevation(peaks, view.eye, world.detonation.missileBearing);
+
+        // The top of the frame, in the same terms: how far the camera is already looking up or
+        // down, plus most of half its vertical field of view. Not all of it: an entry point on
+        // the edge of the frame is a missile that enters by being clipped, and the sliver held
+        // back leaves a little sky above it to have come out of. Only a sliver, though -- every
+        // degree reserved here is a degree of the gap between the summits and the top of the
+        // frame, and on the shots that look down into the basin that gap is already thin.
+        const core::Vec3 toTarget = view.target - view.eye;
+        const core::Vec3 forward  = core::Normalize(toTarget);
+        const float      pitch    = std::atan2(
+            toTarget.y, std::fmax(std::sqrt(toTarget.x * toTarget.x + toTarget.z * toTarget.z),
+                                       1.0f));
+        const float ceiling = pitch + view.fovY * kMissileFrameTop;
+
+        // And the sides of the frame. The aspect ratio belongs to a monitor this cycle has not met
+        // yet, so the narrowest one likely to run it is assumed: on anything wider there is more
+        // room than this, never less.
+        const float halfWide =
+            std::atan(std::tan(view.fovY * 0.5f) * 16.0f / 9.0f) * kMissileOnAxis;
 
         // Two degrees of sky between the missile and the summits. Below about one the entry sits
         // on the ridgeline and reads as having come *off* the mountains rather than over them.
-        world.detonation.AimOverRidge(entry.eye, ridge, core::Radians(2.0f), kMissileMaxRun);
+        //
+        // The bearing is drawn at random (spec 7.1) and a random bearing is sometimes the one the
+        // camera has its back to, where no descent angle can put the entry both over the range and
+        // on screen. So the bearing is walked outward from the draw, two degrees at a time, until
+        // one works -- keeping as much of the random direction as the shot allows rather than
+        // replacing it with a fixed one. The ridge has to be re-measured at each candidate,
+        // because the silhouette is different in every direction, which is why this loop lives
+        // here with the peaks rather than inside Detonation.
+        const float drawn = world.detonation.missileBearing;
 
-        app::Log("missile: bearing %.0f deg, descent %.0f deg, run %.0fm, entry %.0fm up at "
-                 "%.1f deg over a %.1f deg ridge",
-                 world.detonation.missileBearing / core::kDegToRad,
-                 world.detonation.missileDescent / core::kDegToRad, world.detonation.missileRun,
-                 world.detonation.missileStart.y,
-                 world.detonation.MissileEntryElevation(entry.eye) / core::kDegToRad,
-                 ridge / core::kDegToRad);
+        // Two tiers, because the two requirements are not equally negotiable. Being on screen is
+        // the harder one -- a missile entering behind the viewer is not an entrance at all -- so a
+        // bearing that is in shot but level with the peaks beats one that clears them off the side
+        // of the frame. Both tiers still prefer the drawn direction: the walk goes outward from it
+        // and stops at the first bearing that answers, so a cycle gives up only as much of its
+        // random approach as the shot makes it.
+        float bestBoth = core::kPi * 4.0f;  // the nearest bearing that is over the range and in shot
+        float bestSeen = core::kPi * 4.0f;  // the nearest that is merely in shot
+
+        for (int step = 0; step < 90; ++step) {
+            for (int side = 0; side < 2; ++side) {
+                const float bearing =
+                    drawn + core::Radians(2.0f) * static_cast<float>(side ? step : -step);
+
+                world.detonation.SetMissileBearing(bearing);
+                const float here = SilhouetteElevation(peaks, view.eye, bearing);
+                const float got =
+                    world.detonation.AimApproach(view.eye, here, core::Radians(2.0f), ceiling);
+
+                if (world.detonation.MissileEntryOffAxis(view.eye, forward) <= halfWide) {
+                    if (bestSeen > core::kPi * 3.0f) bestSeen = bearing;
+                    if (got > here && bestBoth > core::kPi * 3.0f) bestBoth = bearing;
+                }
+                if (step == 0) break;  // both sides are the same bearing at zero
+            }
+            if (bestBoth < core::kPi * 3.0f) break;
+        }
+
+        const float chosen = bestBoth < core::kPi * 3.0f
+                                 ? bestBoth
+                                 : (bestSeen < core::kPi * 3.0f ? bestSeen : drawn);
+
+        world.detonation.SetMissileBearing(chosen);
+        const float bestRidge = SilhouetteElevation(peaks, view.eye, chosen);
+        const float best =
+            world.detonation.AimApproach(view.eye, bestRidge, core::Radians(2.0f), ceiling);
+
+        app::Log("missile: bearing %.0f deg (drawn %.0f), run %.0fm, descent %.0f deg, entry "
+                 "%.0fm up at %.1f deg, %.1f off axis (ridge %.1f, frame top %.1f)",
+                 world.detonation.missileBearing / core::kDegToRad, drawn / core::kDegToRad,
+                 world.detonation.missileRun,
+                 world.detonation.missileDescent / core::kDegToRad,
+                 world.detonation.missileStart.y, best / core::kDegToRad,
+                 world.detonation.MissileEntryOffAxis(view.eye, forward) / core::kDegToRad,
+                 bestRidge / core::kDegToRad, ceiling / core::kDegToRad);
     }
 
     app::Log("world: seed=%llu %s %s cityRadius=%.0fm revolution=%.0fs",

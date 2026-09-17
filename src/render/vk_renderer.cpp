@@ -1321,7 +1321,7 @@ private:
             // and a 30-linear emitter that small and that far away is a bloom bead with nothing
             // legible inside it. The airframe carries the visibility instead, lit rather than
             // emissive, which is what "bright, but not a glowing dot" asks for.
-            push.exhaust[0] = 20.0f;
+            push.exhaust[0] = 9.0f;
 
             vkCmdPushConstants(frame.cmd, missilePipelineLayout_,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,

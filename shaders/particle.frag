@@ -46,11 +46,17 @@ void main() {
         float keyAbove = HighAirKeyAbove(scene.keyDirection.xyz, vWorldPos.y);
         float wrap     = 0.5 + 0.5 * dot(normal, scene.keyDirection.xyz);
 
-        // The missile's contrail hangs kilometres up, where the key light still reaches after the
+        // The missile's contrail hangs high enough that the key light still reaches it after the
         // ground has lost it. Same term the airframe uses, and the reason a contrail overhead at
         // dusk is white against a sky that has already gone blue. Flat at ground level, so the
         // four systems that live in the first hundred metres are untouched by it.
-        float high = HighAirLight(vWorldPos.y);
+        //
+        // Taken at a quarter strength. A contrail is dozens of overlapping sprites deep, so its
+        // composite is the colour of one particle however faint each is made -- turning the alpha
+        // down does not dim a solid trail, it only softens its edges. That colour has to be close
+        // to the sky it hangs in; at full strength it was the key light, which at twilight is a
+        // saturated orange, and the trail came out as a bar of it ruled across the sunset.
+        float high = mix(1.0, HighAirLight(vWorldPos.y), 0.25);
 
         // Weighted toward the horizon rather than the zenith, which is the opposite of what the
         // ground floor does and for the same reason: the ground is a level surface that sees the
@@ -64,7 +70,7 @@ void main() {
         // Above one on purpose. Dust is lit from every direction at once, including from the
         // ground it is hanging over, and at the cosine-weighted figure the ground uses it came out
         // the same colour as the ground — which for a screen saver means it is not there at all.
-        lit += vTint.rgb * skyAmbient * (scene.groundColor.w * 1.9) * high;
+        lit += vTint.rgb * skyAmbient * (scene.groundColor.w * 1.9);
 
         // Forward scattering. A cloud between the eye and a low sun is brighter than the same
         // cloud lit from behind the eye, and at twilight — the default time of day — the sun is
@@ -72,7 +78,7 @@ void main() {
         // a smear of dark paint on the sky.
         float forward = max(-dot(viewDir, scene.keyDirection.xyz), 0.0);
         lit += vTint.rgb * scene.keyColor.rgb *
-               (forward * forward * forward * 1.4 * keyAbove * high);
+               (forward * forward * forward * 1.4 * keyAbove);
 
         vec3  toBoard   = scene.boardLight.xyz - vWorldPos;
         float boardDist = length(toBoard);

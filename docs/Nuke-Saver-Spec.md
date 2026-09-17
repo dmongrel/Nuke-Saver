@@ -326,18 +326,35 @@ Requirements:
 
 **Where it comes from**
 
-- The entry point MUST be **above the mountain silhouette (6.3) as seen from the camera**, by a
-  clear margin, so the missile comes in over the range rather than appearing in front of it. This
-  is a statement about an angle, not about a distance: the same entry point is over the mountains
-  from a street-level shot and below them from a high oblique one. It therefore MUST be settled
-  after the camera and the range are, and it MUST be reached by lengthening the approach along the
-  bearing and descent angle already drawn, so that nothing solved earlier against the approach is
-  invalidated.
-- The approach MUST be long enough to be aimed that way and no longer. A run that overshoots the
-  requirement puts the missile so far out that it is a speck crossing half the sky, and a cap is
-  needed as well: an entry point walking outward without limit ends up inside the range itself.
-- Descent is steep enough to come down out of the sky — roughly 30° to 45° — rather than the
-  shallow slide that put the missile among the rooftops for the last second of its run.
+Two requirements, both about the entry point's **elevation as seen from the camera**, and neither
+about a distance — the same entry point is over the mountains from a street-level shot and below
+them from a high oblique one:
+
+- It MUST be **above the mountain silhouette (6.3)** at its own bearing, by a clear margin, so the
+  missile comes in over the range rather than appearing in front of it.
+- It MUST be **inside the frame**, below the top edge and in front of the camera rather than off
+  to one side of it. A missile the viewer never sees arrive fails this phase more completely than
+  one that enters level with the peaks: an entry aimed over mountains the shot does not contain is
+  a correct number and an empty screen.
+
+Both are therefore settled **after** the camera and the range exist, and what is adjusted to meet
+them is the **descent angle** — the approach is turned, not moved. The bearing and the run length
+are drawn per cycle and left alone, so the arrival that the framing solver was given does not move
+under it, and the entry point's distance from the camera does not depend on the angle being solved
+for, which makes the solve one line of trigonometry rather than a search.
+
+- The descent angle MUST be held to a band a missile could plausibly hold — roughly 10° to 45°.
+  Below the floor the approach is the shallow slide that put the missile among the rooftops for
+  the last second of its run; above the ceiling it is a drop, and the contrail behind it is a
+  vertical stroke that says nothing about where the missile came from.
+- The **bearing** is the one thing that may be given up, and only as much of it as the shot
+  demands: a random bearing is sometimes the one the camera has its back to, where no descent
+  angle puts the entry both over the range and on screen. The search MUST walk outward from the
+  drawn bearing and stop at the first that works, and MUST prefer a bearing that is in shot but
+  level with the peaks over one that clears them off the edge of the frame.
+- Where the shot carries no sky above the range at all — the steep passes look down into the
+  basin — the frame wins and the missile enters from above the top edge. This is a property of
+  those shots, not a defect.
 
 **How it flies**
 
@@ -352,15 +369,24 @@ Requirements:
 **How it reads**
 
 - It MUST be bright, and it MUST NOT be a glowing dot. The airframe carries the visibility, lit
-  rather than emissive: it is kilometres up, where the key light still reaches after the ground
-  has lost it, so at the default twilight it is a white object against a darkening sky. A small
-  emitter at that range is a bloom bead with nothing legible inside it, so the exhaust plume is
-  short, sits at the bottom of 5.1's band, and dims further with distance.
+  rather than emissive: it is high enough that the key light still reaches it after the ground has
+  lost it, so at the default twilight it is a pale object against a darkening sky. A small emitter
+  at that range is a bloom bead with nothing legible inside it, so the exhaust plume is short,
+  sits at the bottom of 5.1's band, and dims further with distance.
+- The high-altitude term applies to the **key light only**. It says that the sun is below the
+  ground's horizon and above this object's, which is a statement about one light and no others;
+  applied to the sky ambient as well it says the sky is brighter up there, which is false, and at
+  twilight it is enough to lift the trail above the sunset behind it.
 - It MUST leave a thin smoke contrail, persisting long enough to draw the whole approach back to
   where it came over the mountains. Thin is the requirement, not incidental: a trail as wide as
-  the missile is long is a smear, and what makes a contrail read at range is its length and its
-  brightness, not its width. The contrail is lit by the same high-altitude key light the airframe
-  is, for the same reason.
+  the missile is long is a smear.
+- The contrail MUST read as close in tone to the sky it hangs in, a little brighter and less
+  saturated, never as a solid stroke ruled across it. A contrail is dozens of overlapping sprites
+  deep, so **its colour is the colour of one sprite whatever its alpha is** — lowering the alpha
+  softens its edges and does not dim it — and the composite sits far enough up the tonemap's
+  shoulder that halving anything is invisible. Its density MUST therefore be set by the emission
+  rate, its tone by the particle's own colour, and both MUST be checked by measuring the rendered
+  pixels against the sky beside them rather than by eye.
 - At impact the missile is destroyed. It MUST NOT be visible in phase 5 or later.
 
 ### 7.2 Flash and blast (phases 5–6)

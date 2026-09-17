@@ -35,11 +35,11 @@ struct Detonation {
     // reproducible from the seed. The run is a straight line from `missileStart` to `center`,
     // arriving exactly at the end of phase 4.
     //
-    // The bearing and the descent angle are drawn in Create. The run length is not: spec 7.1
-    // requires the missile to enter *above the mountains*, and whether a given entry point does
-    // that depends on where the camera is standing and how tall the range behind it turned out —
-    // neither of which exists yet when the detonation is made. So Create sets a provisional run
-    // and AimOverRidge lengthens it once the shot and the range are solved.
+    // The bearing and the run length are drawn in Create. The descent angle is not: spec 7.1
+    // requires the missile to enter *just above the mountains and inside the frame*, and where
+    // that is depends on the camera, on how tall the range behind it turned out, and on how wide
+    // the shot is — none of which exist yet when the detonation is made. So Create leaves the
+    // angle at zero and AimApproach solves it once the shot and the range are built.
     core::Vec3 missileStart{};
     float      missileBearing = 0.0f;  // radians, the compass direction the entry lies in
     float      missileDescent = 0.0f;  // radians below horizontal
@@ -85,10 +85,18 @@ struct Detonation {
         return core::Lerp(u, slowed, 0.55f);
     }
 
-    // Moves the entry point to `run` metres of ground from the impact point, along the bearing and
-    // descent angle already drawn. The one place missileStart is written, so the three numbers
-    // that describe the approach cannot drift apart from the point they describe.
+    // Moves the entry point to `run` metres of ground from the impact point, along the bearing
+    // and descent angle currently set. The one place missileStart is written, so the numbers that
+    // describe the approach cannot drift apart from the point they describe.
     void SetMissileRun(float run);
+
+    // Swings the whole approach round to a new compass bearing, keeping its length and angle.
+    void SetMissileBearing(float bearing);
+
+    // The horizontal angle between the camera's forward direction and the entry point, in radians.
+    // Zero means the missile enters dead ahead; anything past the camera's half field of view is a
+    // missile entering off the side of the screen, or behind the viewer entirely.
+    float MissileEntryOffAxis(const core::Vec3& eye, const core::Vec3& forward) const;
 
     // Where the missile is when it still has `distance` metres of its path left to fly. The
     // framing solver of spec 11.1 sizes its missile subject from this rather than from a clock
@@ -101,12 +109,30 @@ struct Detonation {
     // the rooftops instead of coming down out of the sky.
     float MissileEntryElevation(const core::Vec3& eye) const;
 
-    // Spec 7.1: lengthens the run, keeping the bearing and the descent angle, until the entry
-    // point clears `ridgeElevation` by `margin` radians as seen from `eye` — that is, until the
-    // missile comes in over the mountains rather than in front of them. Gives up at a cap rather
-    // than running away: a run long enough to clear a 3 km range seen from a 2.5 km camera would
-    // put the entry point inside the range itself.
-    void AimOverRidge(const core::Vec3& eye, float ridgeElevation, float margin, float maxRun);
+    // Spec 7.1: sets the descent angle so the entry point sits `margin` radians above
+    // `ridgeElevation` as seen from `eye` — over the mountains rather than in front of them — but
+    // never above `ceiling`, the highest elevation still comfortably inside the frame. Both bounds
+    // are the requirement: an entry below the ridge is a missile that slid in off the peaks, and
+    // one above the frame is a missile the viewer never sees arrive.
+    //
+    // The two cannot always both be met. The steep shots look down into the basin and carry no sky
+    // at all — their ceiling is below the horizon, let alone below the range — and there the
+    // ceiling wins: a missile dropping into frame from above is still a missile arriving, and one
+    // aimed over mountains the shot does not contain is not.
+    //
+    // The bearing and the run are left alone. Because they are, the horizontal distance from the
+    // eye to the entry point does not depend on the angle being solved for, which makes this one
+    // line of trigonometry rather than a search.
+    //
+    // Returns the elevation it actually achieved, which differs from the target only when the
+    // angle had to be clamped to the band a missile can plausibly descend at.
+    float AimApproach(const core::Vec3& eye, float ridgeElevation, float margin, float ceiling);
+
+    // The band the solved descent angle is held to. Below the floor the approach is the shallow
+    // slide across the rooftops this replaced; above the ceiling it is a drop, and the contrail
+    // behind it is a vertical stroke that says nothing about where the missile came from.
+    static constexpr float kDescentMin = 0.1745f;  // 10 degrees
+    static constexpr float kDescentMax = 0.7854f;  // 45 degrees
 
     // Spec 5.1: the flash peaks at 8,000-15,000 linear. Zero outside phase 5, ramping over the
     // first ~120 ms and holding for the rest of it (spec 7.2).

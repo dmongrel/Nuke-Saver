@@ -199,25 +199,25 @@ void TestMissile() {
     }
     Check(orthonormal, "the missile transform is orthonormal, so it rotates normals correctly");
 
-    // Spec 7.1: the missile MUST enter above the mountains. AimOverRidge is the mechanism, so it
-    // is asked the question directly, at every shot height the library reaches and on both sides
-    // of the city -- an entry on the camera's own side clears a ridge trivially, and one on the
-    // far side has to climb past the whole basin to do it.
-    bool clears   = true;
-    bool keptAim  = true;
-    bool respects = true;
-    bool shortest = true;
+    // Spec 7.1: the missile MUST enter above the mountains, and MUST be in shot doing it.
+    // AimApproach is the mechanism, so it is asked the question directly, at every shot height the
+    // library reaches and on both sides of the city -- an entry on the camera's own side clears a
+    // ridge trivially, and one on the far side has to climb past the whole basin to do it.
+    bool clears  = true;
+    bool inFrame = true;
+    bool banded  = true;
+    bool keptAim = true;
 
     for (uint64_t s = 1; s <= 120; ++s) {
         const uint64_t   seed   = s * 0x9E3779B97F4A7C15ull + 7ull;
         const float      radius = 600.0f + static_cast<float>(s % 400);
         Detonation       det    = Detonation::Create(seed, radius, 180.0f);
 
-        const float bearing  = det.missileBearing;
-        const float descent  = det.missileDescent;
-        const float start    = det.missileRun;
-        const float ridge    = core::Radians(4.0f + static_cast<float>(s % 7));
-        const float margin   = core::Radians(2.0f);
+        const float bearing = det.missileBearing;
+        const float run     = det.missileRun;
+        const float ridge   = core::Radians(4.0f + static_cast<float>(s % 7));
+        const float margin  = core::Radians(2.0f);
+        const float ceiling = core::Radians(9.0f + static_cast<float>(s % 5));
 
         // Eight camera positions round the orbit, at four heights spanning the shot library.
         const float around = core::kTwoPi * static_cast<float>(s % 8) / 8.0f;
@@ -225,51 +225,47 @@ void TestMissile() {
         const core::Vec3 eye{std::cos(around) * radius * 2.4f, height,
                              std::sin(around) * radius * 2.4f};
 
-        det.AimOverRidge(eye, ridge, margin, 7000.0f);
+        const float got  = det.AimApproach(eye, ridge, margin, ceiling);
+        const float want = std::fmin(ridge + margin, ceiling);
 
-        // Either it cleared the ridge, or no run inside the cap could have. The second half
-        // matters more than the first: "it gave up" is the answer a broken search gives too, so
-        // giving up is only acceptable when the longest run available also falls short.
-        const float want = ridge + margin;
-        const float got  = det.MissileEntryElevation(eye);
-        if (got < want) {
-            Detonation capped = det;
-            capped.SetMissileRun(7000.0f);
-            if (capped.MissileEntryElevation(eye) >= want) clears = false;
-        }
-        if (det.missileRun > 7000.0f + 1.0f) respects = false;
+        // It hit the target elevation, unless the angle that would have taken it there is outside
+        // the band a missile descends at -- in which case it must be sitting *on* a bound, not
+        // somewhere convenient in the middle of the band.
+        const bool clamped = std::fabs(det.missileDescent - Detonation::kDescentMin) < 1e-5f ||
+                             std::fabs(det.missileDescent - Detonation::kDescentMax) < 1e-5f;
+        if (std::fabs(got - want) > core::Radians(0.05f) && !clamped) clears = false;
 
-        // And no longer than it had to be. A run that clears the ridge by a mile is a missile
-        // that is a speck crossing the sky at four times the speed it needs, so the search has to
-        // stop at the first run that works rather than at a comfortable one: one step shorter
-        // must fail.
-        if (det.missileRun > start + 1.0f) {
-            Detonation shorter = det;
-            shorter.SetMissileRun(det.missileRun - (7000.0f - start) / 48.0f - 1.0f);
-            if (shorter.MissileEntryElevation(eye) >= want) shortest = false;
+        // Under the top of the frame, unless the descent band would not reach that low. The
+        // second is not a nicety: at a steep enough descent the entry sits above everything the
+        // camera can see, and the whole approach happens off screen.
+        if (got > ceiling + core::Radians(0.05f) && !clamped) inFrame = false;
+        if (det.missileDescent < Detonation::kDescentMin - 1e-5f ||
+            det.missileDescent > Detonation::kDescentMax + 1e-5f) {
+            banded = false;
         }
 
-        // Aiming moves the entry point out along the approach it was already on. If it changed the
-        // bearing or the angle, the framing solved before it would have been solved for a
-        // different missile.
+        // Aiming turns the approach; it does not move it. If it changed the bearing or the run,
+        // the arrival the framing was solved against would be somewhere else.
         if (std::fabs(det.missileBearing - bearing) > 1e-5f) keptAim = false;
-        if (std::fabs(det.missileDescent - descent) > 1e-5f) keptAim = false;
+        if (std::fabs(det.missileRun - run) > 1e-3f) keptAim = false;
 
-        const core::Vec3 run = det.missileStart - det.center;
-        const float      flat = std::sqrt(run.x * run.x + run.z * run.z);
-        if (std::fabs(std::atan2(run.y, flat) - descent) > 1e-3f) keptAim = false;
+        const core::Vec3 line = det.missileStart - det.center;
+        const float      flat = std::sqrt(line.x * line.x + line.z * line.z);
+        if (std::fabs(std::atan2(line.y, flat) - det.missileDescent) > 1e-3f) keptAim = false;
     }
 
-    Check(clears, "the missile is aimed in over the mountains, or as far over them as it can get");
-    Check(respects, "and never past the cap that would put its entry point inside the range");
-    Check(shortest, "and no further out than clearing the ridge actually required");
-    Check(keptAim, "aiming lengthens the run without touching the bearing or the descent angle");
+    Check(clears, "the missile is aimed to enter just clear of the mountains");
+    Check(inFrame, "and below the top of the frame, so the approach is on screen");
+    Check(banded, "at a descent angle a missile could plausibly hold");
+    Check(keptAim, "aiming turns the approach without moving its bearing or its length");
 
     // And the same question of whole worlds, which is where the ordering can go wrong: the aim is
     // taken against the camera and the range that this cycle actually built, and both of those are
     // decided after the detonation is. Eight is enough to catch a mis-ordering; it is not a survey.
-    bool worldsClear = true;
-    for (uint64_t s = 1; s <= 8; ++s) {
+    bool worldsClear  = true;
+    bool worldsFramed = true;
+    bool worldsAhead  = true;
+    for (uint64_t s = 1; s <= 40; ++s) {
         app::Settings settings;
         settings.camera = static_cast<app::CameraMode>(s % 4 == 0 ? 1 : (s % 4) + 1);
 
@@ -279,12 +275,53 @@ void TestMissile() {
         // world.horizon, and the generator is seeded, so this is the same range.
         const std::vector<Peak> peaks = GeneratePeaks(w.horizon);
 
-        const CameraState entry = w.camera.Evaluate(w.timeline.Start(Phase::Missile));
-        const float ridge = SilhouetteElevation(peaks, entry.eye, w.detonation.missileBearing);
+        const CameraState view = w.camera.Evaluate(w.timeline.Start(Phase::Missile));
+        const float ridge = SilhouetteElevation(peaks, view.eye, w.detonation.missileBearing);
+        const float got   = w.detonation.MissileEntryElevation(view.eye);
 
-        if (w.detonation.MissileEntryElevation(entry.eye) <= ridge) worldsClear = false;
+        // Derived here the way world.cpp derives it, which is the point of asking: the frame
+        // the entry was aimed into has to be this camera's rather than a constant that happened
+        // to suit the shots in the loop.
+        const core::Vec3 toTarget = view.target - view.eye;
+        const float pitch = std::atan2(
+            toTarget.y, std::fmax(std::sqrt(toTarget.x * toTarget.x + toTarget.z * toTarget.z),
+                                  1.0f));
+        const float top = pitch + view.fovY * 0.5f;
+
+        // Whether this shot has room for a missile above the range at all. The steep shots look
+        // down into the basin and carry no sky; a few carry a sliver, with the summits sitting in
+        // it. Neither can show an entry over the mountains, and spec 7.1 says being on screen wins
+        // in that case -- so the requirement asked of them below is the other one.
+        const bool room = ridge + core::Radians(2.0f) <= pitch + view.fovY * 0.44f;
+
+        // Over the range and inside the frame -- except on a shot whose frame does not reach the
+        // range at all, which is the one case where the two cannot both hold and spec 7.1 says
+        // the frame wins. Written as a branch rather than as a skip, so a shot that quietly
+        // stopped showing the horizon would not quietly stop being checked: it would move to the
+        // other arm, where being on screen is still required of it.
+        if (room) {
+            if (got <= ridge) worldsClear = false;
+            if (got > top) worldsFramed = false;
+        } else if (got > top) {
+            // No room: the entry is above the frame and comes down into it. Acceptable only when
+            // nothing could have been done about it -- that is, when the descent is already as
+            // shallow as a missile is allowed to hold. Anything else is an aim that gave up early.
+            if (std::fabs(w.detonation.missileDescent - Detonation::kDescentMin) > 1e-5f) {
+                worldsFramed = false;
+            }
+        }
+
+        // And on screen sideways as well as vertically. A bearing is drawn at random, and a random
+        // bearing is sometimes the one the camera has its back to; the aim walks the bearing round
+        // until the entry is in shot, and this is the question that walk exists to answer.
+        const float halfWide = std::atan(std::tan(view.fovY * 0.5f) * 16.0f / 9.0f);
+        if (w.detonation.MissileEntryOffAxis(view.eye, core::Normalize(toTarget)) > halfWide) {
+            worldsAhead = false;
+        }
     }
     Check(worldsClear, "and in a built world the missile enters above the range behind it");
+    Check(worldsFramed, "and inside the frame the camera will be showing when it does");
+    Check(worldsAhead, "and ahead of the camera rather than off the side of the screen");
 }
 
 void TestFireAndFlash() {

@@ -38,7 +38,7 @@ void main() {
 
     vec3 skyAmbient = max(scene.ambientColor.rgb,
                           mix(scene.horizonColor.rgb, scene.zenithColor.rgb, 0.7));
-    shaded += vAlbedo * skyAmbient * scene.groundColor.w * (0.5 + 0.5 * normal.y) * high;
+    shaded += vAlbedo * skyAmbient * scene.groundColor.w * (0.5 + 0.5 * normal.y);
 
     // A hard sheen along the body. A painted metal cylinder with nothing but a Lambert term on it
     // reads as matte plastic at any brightness, and the highlight running down the flank is what

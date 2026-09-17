@@ -37,17 +37,16 @@ Detonation Detonation::Create(uint64_t seed, float cityRadius, float tallestBuil
     const float speed   = rng.Range(5.0f, 11.0f);
     det.wind = core::Vec3{std::cos(bearing) * speed, 0.0f, std::sin(bearing) * speed};
 
-    // Spec 7.1: a random compass bearing, and a descent steep enough that the missile comes down
-    // out of the sky rather than sliding in across the rooftops. The old approach ran 1.7 city
-    // radii at 20 degrees, which put the entry point at about 500 m — below the mountain
-    // silhouette from every shot that stands higher than a truck, so the missile appeared against
-    // the range instead of over it. Coming over the mountains is a statement about the entry's
-    // *elevation as seen from the camera*, and the camera does not exist yet, so all Create fixes
-    // here is the bearing, the angle, and a run long enough to be going somewhere. AimOverRidge
-    // stretches it once the shot is solved.
+    // Spec 7.1: a random compass bearing and a random run length, which is where the variety in
+    // the approach comes from now. The descent angle is not drawn — it is solved by AimApproach
+    // once the camera and the range exist, because "over the mountains" is a statement about the
+    // entry point's elevation *as seen from the camera*, and neither the camera nor the mountains
+    // are here yet. The old approach ran 1.7 city radii at 20 degrees, which put the entry at
+    // about 500 m: below the mountain silhouette from every shot that stands higher than a truck,
+    // so the missile appeared against the range rather than over it.
     det.missileBearing = rng.Range(0.0f, core::kPi * 2.0f);
-    det.missileDescent = rng.Range(core::Radians(30.0f), core::Radians(44.0f));
-    det.SetMissileRun(cityRadius * 3.2f);
+    det.missileDescent = core::Radians(28.0f);  // a placeholder; AimApproach replaces it
+    det.SetMissileRun(cityRadius * rng.Range(3.0f, 5.5f));
 
     // Big enough to read at this distance and no bigger. A missile drawn at true scale against a
     // 1.5 km city is two pixels, and at a fifteenth of the city radius it was still lost against
@@ -131,25 +130,47 @@ void Detonation::SetMissileRun(float run) {
                                        std::sin(missileBearing) * run};
 }
 
-void Detonation::AimOverRidge(const core::Vec3& eye, float ridgeElevation, float margin,
-                              float maxRun) {
-    const float want = ridgeElevation + margin;
+void Detonation::SetMissileBearing(float bearing) {
+    missileBearing = bearing;
+    SetMissileRun(missileRun);
+}
 
-    // Walked rather than solved. The elevation is not monotonic in the run length in closed form —
-    // the entry moves away from the camera as well as up, and by different amounts depending on
-    // whether it is on the camera's side of the city or the far one — so this asks the real
-    // question at a series of run lengths and stops at the first that answers yes. Same shape as
-    // GenerateClosedRange in horizon.cpp, and for the same reason: the check is the requirement.
-    const float start = missileRun;
-    for (int step = 0; step <= 48; ++step) {
-        const float run = core::Lerp(start, maxRun, static_cast<float>(step) / 48.0f);
-        SetMissileRun(run);
-        if (MissileEntryElevation(eye) >= want) return;
-    }
+float Detonation::MissileEntryOffAxis(const core::Vec3& eye, const core::Vec3& forward) const {
+    const core::Vec3 to{missileStart.x - eye.x, 0.0f, missileStart.z - eye.z};
+    const core::Vec3 ahead{forward.x, 0.0f, forward.z};
 
-    // Nothing inside the cap cleared it. Keep the longest run: it is the highest entry available,
-    // which is the closest this cycle gets to what spec 7.1 asks for.
-    SetMissileRun(maxRun);
+    const float toLen    = core::Length(to);
+    const float aheadLen = core::Length(ahead);
+    if (toLen < 1e-3f || aheadLen < 1e-3f) return 0.0f;
+
+    const float cosine = core::Dot(to, ahead) / (toLen * aheadLen);
+    return std::acos(core::Clamp(cosine, -1.0f, 1.0f));
+}
+
+float Detonation::AimApproach(const core::Vec3& eye, float ridgeElevation, float margin,
+                             float ceiling) {
+    // Over the mountains, but still in shot. When the range stands higher in the frame than the
+    // frame has room for — a low camera under a tall ridge — being visible wins: a missile the
+    // viewer never sees arrive fails spec 7.1 more completely than one that enters level with the
+    // peaks rather than above them.
+    const float want = std::fmin(ridgeElevation + margin, ceiling);
+
+    // The run and the bearing are fixed, so the entry point's horizontal distance from the eye is
+    // fixed too, whatever angle it comes down at. That turns the whole thing into one equation:
+    // the entry has to stand `d * tan(want)` above the eye, so it has to stand that plus the eye's
+    // own height above the impact point, and the angle is what puts it there over a run of
+    // `missileRun` metres.
+    const core::Vec3 flat{std::cos(missileBearing) * missileRun + center.x - eye.x, 0.0f,
+                          std::sin(missileBearing) * missileRun + center.z - eye.z};
+    const float      d = std::fmax(core::Length(flat), 1.0f);
+
+    const float rise = (eye.y - center.y) + d * std::tan(want);
+
+    missileDescent = core::Clamp(std::atan2(rise, std::fmax(missileRun, 1.0f)), kDescentMin,
+                                 kDescentMax);
+    SetMissileRun(missileRun);
+
+    return MissileEntryElevation(eye);
 }
 
 float Detonation::FlashIntensity(const Timeline& timeline, float t) const {

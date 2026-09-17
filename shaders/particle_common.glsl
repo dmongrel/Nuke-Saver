@@ -237,12 +237,22 @@ bool ParticleAt(uint index, float t, out Particle p) {
     // at the leading end. A contrail is a scratch on the sky, and what makes it read over the
     // mountains is its length and its brightness, not its width.
     if (sys == 1u) {
-        uint hotSlots = max(cap / 4u, 1u);
+        uint hotSlots = max(cap / 5u, 1u);
         bool hot      = j < hotSlots;
-        life          = hot ? 0.26 : 10.0;
+
+        // Seven seconds, so the far end of the trail is visibly older than the near end by the
+        // time the missile arrives: at sixteen the whole trail sat at the same age and faded as a
+        // unit rather than thinning out behind.
+        life = hot ? 0.26 : 7.0;
 
         uint local = hot ? j : j - hotSlots;
-        uint n     = hot ? hotSlots : (cap - hotSlots);
+
+        // The trail takes a slice of the slots rather than all that are left. Emission rate is
+        // slots over lifetime, so the slice is what sets how densely the trail is laid down: with
+        // the whole remainder it was a puff every half metre, and a stack that deep is opaque
+        // whatever each puff's alpha says.
+        uint n = hot ? hotSlots : max(cap / 9u, 1u);
+        if (!hot && local >= n) return false;
         if (!SlotAge(local, n, pp.mStart.w, pp.mDir.w, life, t, age, gen)) return false;
 
         uint  seed  = (j + 1u) * 977u + gen * 6151u;
@@ -261,8 +271,8 @@ bool ParticleAt(uint index, float t, out Particle p) {
             // supposed to be.
             p.pos      = nozzle - pp.mDir.xyz * (age * 26.0) +
                          jit * (pp.cloud.z * 0.02 + age * 5.0);
-            p.size     = mix(pp.cloud.z * 0.035, pp.cloud.z * 0.10, u);
-            p.tint     = mix(vec3(3.6, 2.1, 0.80), vec3(1.1, 0.30, 0.06), u);
+            p.size     = mix(pp.cloud.z * 0.030, pp.cloud.z * 0.075, u);
+            p.tint     = mix(vec3(1.9, 1.05, 0.38), vec3(0.6, 0.16, 0.03), u);
             p.alpha    = 1.0 - u * u;
             p.additive = true;
         } else {
@@ -271,11 +281,21 @@ bool ParticleAt(uint index, float t, out Particle p) {
             // rising, and takes almost no jitter, so the emitted points lie on the path instead of
             // in a tube around it.
             p.pos   = nozzle - pp.mDir.xyz * (age * 1.2) +
-                      jit * (pp.cloud.z * 0.012 + age * 0.9) +
+                      jit * (pp.cloud.z * 0.03 + age * 0.9) +
                       vec3(wind.x, 0.0, wind.y) * (age * 0.22) - vec3(0.0, age * 0.5, 0.0);
-            p.size  = mix(pp.cloud.z * 0.012, pp.cloud.z * 0.095, sqrt(u));
-            p.tint  = vec3(0.92, 0.90, 0.88);
-            p.alpha = 0.62 * (1.0 - u * u) * smoothstep(0.0, 0.02, u);
+
+            // Thin against the missile, not thin in pixels. At a fiftieth of a body length it was
+            // under a pixel across from where the camera stands and the trail simply was not
+            // there; a sixth of one still reads as a scratch on the sky next to a 190 m airframe.
+            p.size  = mix(pp.cloud.z * 0.035, pp.cloud.z * 0.15, sqrt(u));
+
+            // Grey, not white. What the eye reads as a white contrail is a grey one against a
+            // brighter sky; given a near-white albedo and the sky ambient the dust systems need,
+            // this one came out brighter than the sunset behind it.
+            p.tint  = vec3(0.34, 0.40, 0.56);
+
+            // And faint. It is smoke thinning behind a missile, not a line drawn on the sky.
+            p.alpha = 0.26 * (1.0 - u * u) * smoothstep(0.0, 0.02, u);
         }
         return true;
     }

@@ -38,8 +38,9 @@ Revisions:
 | M6a Particles | done | `1af00ea` | 380 checks; all five systems captured in their own phases |
 | M6b Auto quality | done | `1af00ea` | The controller driven by frame-time lists across every threshold it has |
 | M6c Board and camera rework | done | `1af00ea` | Board captured at phase 2 and mid-countdown; camera elevation checked over 400 seeds |
-| M6d Missile rework | this commit | | 388 checks; aiming mutation-tested three ways; captured at twilight, noon and night |
-| M6e Preview stills, README, acceptance pass | next | | |
+| M6d Missile rework | done | `01a4d52` | 388 checks; aiming mutation-tested three ways; captured at twilight, noon and night |
+| M6e Cast shadows | this commit | | 402 checks; validation clean; captured at noon, morning and mid-gather; the quality lever walked end to end |
+| M6f Preview stills, README, acceptance pass | next | | |
 
 ### Deferred verification
 
@@ -246,6 +247,14 @@ Exit: a full cycle runs end to end and loops cleanly. A14 passes.
   emissive -- it is high enough to still be in the key light after the ground has left it -- and
   the plume is short and dimmed with distance, so the missile is bright without being a bloom
   bead. Behind it is a thin contrail, a quarter of its old width and a ninth of its density.
+- Cast shadows from the key light (spec 8.2.1), from review during M6. **Done.** One orthographic
+  cascade, refitted once per cycle to a box that covers the city, the debris and the cloud at its
+  widest; one map for the renderer rather than one per window, because the sun does not move
+  between monitors. The city and the fragments cast; the terrain, the city, the fragments, the
+  board and the dust particles receive. Only the key terms are attenuated -- sky ambient, the
+  board and the fireball all reach a shaded surface. The bias is slope-scaled at the caster and
+  offset along the normal at the receiver, which is what keeps acne and peter-panning from trading
+  places. Map size is spec 11.2's fourth lever, so it does not move on the first step down.
 - Bake preview stills from a real run and wire the cross-fade, replacing M1's black. This is the
   only part of preview still outstanding; the behavior was signed off at M1.
 - Rewrite `README.md`.

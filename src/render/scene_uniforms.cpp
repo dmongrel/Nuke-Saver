@@ -80,4 +80,13 @@ void SetFire(SceneUniforms* out, const core::Vec3& center, float radius, const c
     out->fireColor[3] = flash;
 }
 
+void SetShadow(SceneUniforms* out, const core::Mat4& lightViewProj, uint32_t mapSize,
+               float texelMetres, float depthBias) {
+    StoreMat4(out->lightViewProj, lightViewProj);
+    out->shadow[0] = mapSize ? 1.0f / static_cast<float>(mapSize) : 0.0f;
+    out->shadow[1] = texelMetres;
+    out->shadow[2] = depthBias;
+    out->shadow[3] = mapSize ? 1.0f : 0.0f;
+}
+
 }  // namespace render

@@ -11,6 +11,7 @@
 // sees the scene at all.
 #define SCENE_SET 1
 
+#define EXPOSURE_READONLY
 #include "exposure.glsl"
 #include "scene.glsl"
 

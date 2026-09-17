@@ -13,11 +13,17 @@
 #include "core/math.h"
 #include "world/sky.h"
 
+#include <cstdint>
+
 namespace render {
 
 struct SceneUniforms {
     float viewProj[16]{};
     float invViewProj[16]{};  // clip -> world, for reconstructing the view ray in the sky pass
+
+    // World -> the key light's clip space (spec 8.2). Fitted once a cycle in render/shadow.h, so
+    // unlike the two above it does not change between frames.
+    float lightViewProj[16]{};
 
     float cameraPos[4]{};     // xyz world, w = seconds since the cycle began
     float keyDirection[4]{};  // xyz towards the light, w = body angular radius (radians)
@@ -48,9 +54,12 @@ struct SceneUniforms {
     // than a parameter threaded through four pipelines.
     float fireLight[4]{};  // xyz world centre, w radius in metres; w = 0 means there is no fire
     float fireColor[4]{};  // rgb linear emissive magnitude, w = flash intensity (spec 7.2)
+
+    // What the receiver needs to read the shadow map, beyond the matrix above.
+    float shadow[4]{};  // x texel in UV, y texel in metres, z depth bias, w 0 = no shadows
 };
 
-static_assert(sizeof(SceneUniforms) == 2 * 64 + 14 * 16, "SceneUniforms must stay std140-tight");
+static_assert(sizeof(SceneUniforms) == 3 * 64 + 15 * 16, "SceneUniforms must stay std140-tight");
 
 // Fills everything the sky and lighting need. The camera matrices are supplied separately
 // because the framing depends on the window's aspect ratio, which is per monitor.
@@ -63,6 +72,11 @@ void SetBoardLight(SceneUniforms* out, const core::Vec3& position, float intensi
 void SetBlast(SceneUniforms* out, const core::Vec3& center, float radius);
 void SetFire(SceneUniforms* out, const core::Vec3& center, float radius, const core::Vec3& color,
              float flash);
+
+// The key light's shadow map. `mapSize` of 0 turns shadows off and is what the receiver tests, so
+// there is no second flag to keep in step with it.
+void SetShadow(SceneUniforms* out, const core::Mat4& lightViewProj, uint32_t mapSize,
+               float texelMetres, float depthBias);
 
 }  // namespace render
 

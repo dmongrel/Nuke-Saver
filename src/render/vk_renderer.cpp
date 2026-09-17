@@ -19,6 +19,7 @@
 #include "render/particle_data.h"
 #include "render/quality.h"
 #include "render/scene_uniforms.h"
+#include "render/shadow.h"
 #include "render/shaders_embedded.h"
 #include "render/vk/buffer.h"
 #include "render/vk/context.h"
@@ -200,6 +201,10 @@ struct PipelineDesc {
     // Ordinary source-alpha blending, for the one pass with genuinely translucent geometry: the
     // dust half of the particle systems (spec 8.3).
     bool             alphaBlend   = false;
+    // Slope-scaled depth bias, for the shadow casters. A surface nearly edge-on to the light
+    // spans many times its own thickness in one texel, and no constant bias covers both that and
+    // a surface facing the light squarely (spec 8.2).
+    bool             depthBias    = false;
 };
 
 VkPipeline CreateComputePipeline(VkDevice dev, const char* name, VkPipelineLayout layout) {
@@ -224,9 +229,13 @@ VkPipeline CreateComputePipeline(VkDevice dev, const char* name, VkPipelineLayou
 }
 
 VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
+    // No fragment shader at all is the shadow pass: it writes depth and nothing else, so there is
+    // no second stage to compile and no colour attachment for a blend state to describe.
+    const bool depthOnly = desc.frag == nullptr;
+
     VkShaderModule vert = LoadShader(dev, desc.vert);
-    VkShaderModule frag = LoadShader(dev, desc.frag);
-    if (!vert || !frag) {
+    VkShaderModule frag = depthOnly ? VK_NULL_HANDLE : LoadShader(dev, desc.frag);
+    if (!vert || (!depthOnly && !frag)) {
         if (vert) vkDestroyShaderModule(dev, vert, nullptr);
         if (frag) vkDestroyShaderModule(dev, frag, nullptr);
         return VK_NULL_HANDLE;
@@ -318,6 +327,11 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
     raster.cullMode    = desc.backfaceCull ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
     raster.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     raster.lineWidth   = 1.0f;
+    if (desc.depthBias) {
+        raster.depthBiasEnable         = VK_TRUE;
+        raster.depthBiasConstantFactor = 2.0f;
+        raster.depthBiasSlopeFactor    = 3.0f;
+    }
 
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -355,8 +369,8 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
 
     VkPipelineColorBlendStateCreateInfo blend{};
     blend.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend.attachmentCount = 1;
-    blend.pAttachments    = &blendAttachment;
+    blend.attachmentCount = depthOnly ? 0 : 1;
+    blend.pAttachments    = depthOnly ? nullptr : &blendAttachment;
 
     // Viewport and scissor are dynamic so one pipeline serves monitors of different sizes.
     const VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
@@ -368,7 +382,7 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
 
     VkGraphicsPipelineCreateInfo gpi{};
     gpi.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    gpi.stageCount          = 2;
+    gpi.stageCount          = depthOnly ? 1u : 2u;
     gpi.pStages             = stages;
     gpi.pVertexInputState   = &vertexInput;
     gpi.pInputAssemblyState = &assembly;
@@ -387,10 +401,11 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
         vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpi, nullptr, &pipeline);
 
     vkDestroyShaderModule(dev, vert, nullptr);
-    vkDestroyShaderModule(dev, frag, nullptr);
+    if (frag) vkDestroyShaderModule(dev, frag, nullptr);
 
     if (res != VK_SUCCESS) {
-        app::Log("vulkan: pipeline %s/%s failed (%d)", desc.vert, desc.frag, static_cast<int>(res));
+        app::Log("vulkan: pipeline %s/%s failed (%d)", desc.vert,
+                 desc.frag ? desc.frag : "(depth only)", static_cast<int>(res));
         return VK_NULL_HANDLE;
     }
     return pipeline;
@@ -469,6 +484,11 @@ public:
         if (tonemapSetLayout_) vkDestroyDescriptorSetLayout(dev, tonemapSetLayout_, nullptr);
         if (sampler_) vkDestroySampler(dev, sampler_, nullptr);
 
+        DestroyShadowMap();
+        if (shadowSampler_) vkDestroySampler(dev, shadowSampler_, nullptr);
+        if (shadowBuildingPipeline_) vkDestroyPipeline(dev, shadowBuildingPipeline_, nullptr);
+        if (shadowFragmentPipeline_) vkDestroyPipeline(dev, shadowFragmentPipeline_, nullptr);
+
         if (descriptorPool_) vkDestroyDescriptorPool(dev, descriptorPool_, nullptr);
         vk::DestroyRenderPasses(*ctx_, &passes_);
     }
@@ -485,6 +505,47 @@ public:
         if (!CreateTonemapLayout()) return false;
 
         VkDevice dev = ctx_->device();
+
+        // The shadow map's sampler compares rather than returns: the hardware does the depth test
+        // and filters the *result* over its 2x2 neighbourhood, which is what makes the receiver's
+        // 3x3 tap pattern cover four times the area it looks like it does. Clamped to the border
+        // and to a lit border, so a lookup that falls off the map is lit rather than dark -- the
+        // alternative smears whatever was on the edge texel across the desert (spec 8.2).
+        {
+            VkSamplerCreateInfo sci{};
+            sci.sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            sci.magFilter        = VK_FILTER_LINEAR;
+            sci.minFilter        = VK_FILTER_LINEAR;
+            sci.mipmapMode       = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            sci.addressModeU     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            sci.addressModeV     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            sci.addressModeW     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+            sci.borderColor      = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+            sci.compareEnable    = VK_TRUE;
+            sci.compareOp        = VK_COMPARE_OP_LESS_OR_EQUAL;
+            if (vkCreateSampler(dev, &sci, nullptr, &shadowSampler_) != VK_SUCCESS) {
+                app::Log("vulkan: shadow sampler failed");
+                return false;
+            }
+        }
+
+        shadowFormat_ = vk::ChooseDepthFormat(*ctx_);
+        if (!CreateShadowMap(ShadowMapSize(QualityLevel()))) return false;
+
+        // The two casters (spec 8.2). Depth only -- no fragment shader, so no colour attachment
+        // and nothing to blend -- and back-face culled for the city exactly as the scene pass
+        // culls it, so a box contributes the same silhouette to both.
+        shadowBuildingPipeline_ = CreateGraphicsPipeline(
+            dev, {"shadow_building.vert", nullptr, passes_.shadow, scenePipelineLayout_, true,
+                  true, PipelineDesc::Vertices::Building, true, 1, false, false, true});
+        if (!shadowBuildingPipeline_) return false;
+
+        // The fragments are single triangles with no inside, so there is no back face to cull and
+        // the slope bias has to carry the whole job on its own.
+        shadowFragmentPipeline_ = CreateGraphicsPipeline(
+            dev, {"shadow_fragment.vert", nullptr, passes_.shadow, fragmentDrawLayout_, true, true,
+                  PipelineDesc::Vertices::None, false, 2, false, false, true});
+        if (!shadowFragmentPipeline_) return false;
 
         // The sky neither tests nor writes depth: it is behind everything by definition, and it
         // is drawn first so terrain and city simply overwrite it.
@@ -590,6 +651,11 @@ public:
         bloomUpPipeline_   = CreateComputePipeline(dev, "bloom_up.comp", bloomPipelineLayout_);
         if (!bloomDownPipeline_ || !bloomUpPipeline_) return false;
 
+        // The first cycle's world already exists by now; every later one goes through ResetCycle,
+        // which fits the map again. Without this the opening cycle would light a map fitted to the
+        // default one-metre box, and nothing in the world would be inside it.
+        FitShadowMap();
+
         return UploadStaticGeometry();
     }
 
@@ -619,6 +685,7 @@ public:
                 return false;
             }
             BindUniformBuffer(a.sceneSet[i], a.sceneUbo[i]);
+            BindShadowMap(a.sceneSet[i]);
         }
 
         // Host visible, and zeroed here rather than by a staging copy. The shader reads this buffer
@@ -737,6 +804,7 @@ public:
         // The fragment simulation belongs to the world, not to a window: it is stepped once, in
         // whichever command buffer opens first, and every monitor then draws the same state.
         bool simulated = false;
+        bool shadowed  = false;
 
         for (auto& w : windows_) {
             WindowTarget::Frame frame = w.target->Begin(*ctx_, passes_);
@@ -750,6 +818,13 @@ public:
             }
             UpdateSceneUniforms(w, frame.frameSlot, t);
             RefreshTonemapBinding(w);
+
+            // After the uniforms, because the pass reads the light matrix out of them, and once
+            // for all windows, because the map does not depend on a camera.
+            if (!shadowed) {
+                RecordShadow(frame, w);
+                shadowed = true;
+            }
 
             // Per window, not per frame: the sort is by distance from a camera, and two monitors
             // do not share one (spec 8.3).
@@ -838,9 +913,10 @@ private:
 
         const VkDescriptorPoolSize sizes[] = {
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8 * kFramesInFlight},
-            // Two per window for the tonemap (the HDR image and the finished bloom), plus one per
-            // bloom step.
-            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8 * 2 + bloomSets},
+            // Two per window for the tonemap (the HDR image and the finished bloom), one per
+            // bloom step, and the shadow map in every scene set.
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+             8 * 2 + bloomSets + 8 * kFramesInFlight},
             // The fragment buffers, one set for the whole renderer, plus one auto-exposure buffer
             // and two particle buffers per window: the first are the world's, the rest are a
             // window's, because both the exposure and the sort order belong to a view.
@@ -857,20 +933,29 @@ private:
     }
 
     bool CreateSceneLayout() {
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding         = 0;
-        binding.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        binding.descriptorCount = 1;
+        VkDescriptorSetLayoutBinding bindings[2]{};
+        bindings[0].binding         = 0;
+        bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[0].descriptorCount = 1;
         // Visible to all three stages: the vertex stage needs viewProj, the fragment stage needs
         // the lighting, and the particle sort needs the camera position, because which particle is
         // behind which is a question about a view rather than about the world (spec 8.3).
-        binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
-                             VK_SHADER_STAGE_COMPUTE_BIT;
+        bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+                                 VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // The key light's depth map (spec 8.2). In the scene set rather than threaded through each
+        // surface pipeline for the same reason the fireball is: four pipelines read it and they
+        // all already have this set bound. Pipelines whose shaders never declare it are unharmed
+        // by its being here.
+        bindings[1].binding         = 1;
+        bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[1].descriptorCount = 1;
+        bindings[1].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo dsl{};
         dsl.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        dsl.bindingCount = 1;
-        dsl.pBindings    = &binding;
+        dsl.bindingCount = 2;
+        dsl.pBindings    = bindings;
         if (vkCreateDescriptorSetLayout(ctx_->device(), &dsl, nullptr, &sceneSetLayout_) !=
             VK_SUCCESS) {
             return false;
@@ -951,6 +1036,78 @@ private:
         ai.descriptorSetCount = 1;
         ai.pSetLayouts        = &layout;
         return vkAllocateDescriptorSets(ctx_->device(), &ai, out) == VK_SUCCESS;
+    }
+
+    // The shadow map itself. One image for the whole renderer, because the sun is the same on
+    // every monitor (spec 8.2) -- unlike the sort order or the exposure, which belong to a view.
+    bool CreateShadowMap(uint32_t size) {
+        if (size == shadowSize_ && shadowImage_) return true;
+
+        DestroyShadowMap();
+        if (size == 0) return true;
+
+        VkDevice dev = ctx_->device();
+
+        if (!vk::CreateImage2D(*ctx_, size, size, shadowFormat_,
+                               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                   VK_IMAGE_USAGE_SAMPLED_BIT,
+                               VK_IMAGE_ASPECT_DEPTH_BIT, &shadowImage_, &shadowAlloc_,
+                               &shadowView_)) {
+            app::Log("vulkan: shadow map %ux%u failed", size, size);
+            return false;
+        }
+
+        VkFramebufferCreateInfo fci{};
+        fci.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fci.renderPass      = passes_.shadow;
+        fci.attachmentCount = 1;
+        fci.pAttachments    = &shadowView_;
+        fci.width           = size;
+        fci.height          = size;
+        fci.layers          = 1;
+        if (vkCreateFramebuffer(dev, &fci, nullptr, &shadowFbo_) != VK_SUCCESS) {
+            app::Log("vulkan: shadow framebuffer failed");
+            DestroyShadowMap();
+            return false;
+        }
+
+        shadowSize_ = size;
+        app::Log("vulkan: shadow map %ux%u", size, size);
+        for (auto& w : windows_) {
+            for (uint32_t i = 0; i < kFramesInFlight; ++i) BindShadowMap(w.sceneSet[i]);
+        }
+        return true;
+    }
+
+    void DestroyShadowMap() {
+        VkDevice dev = ctx_->device();
+        if (shadowFbo_) vkDestroyFramebuffer(dev, shadowFbo_, nullptr);
+        if (shadowView_) vkDestroyImageView(dev, shadowView_, nullptr);
+        if (shadowImage_) vmaDestroyImage(ctx_->allocator(), shadowImage_, shadowAlloc_);
+        shadowFbo_   = VK_NULL_HANDLE;
+        shadowView_  = VK_NULL_HANDLE;
+        shadowImage_ = VK_NULL_HANDLE;
+        shadowAlloc_ = VK_NULL_HANDLE;
+        shadowSize_  = 0;
+    }
+
+    void BindShadowMap(VkDescriptorSet set) {
+        if (!shadowView_ || !shadowSampler_) return;
+
+        VkDescriptorImageInfo info{};
+        info.sampler     = shadowSampler_;
+        info.imageView   = shadowView_;
+        info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkWriteDescriptorSet write{};
+        write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet          = set;
+        write.dstBinding      = 1;
+        write.descriptorCount = 1;
+        write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo      = &info;
+
+        vkUpdateDescriptorSets(ctx_->device(), 1, &write, 0, nullptr);
     }
 
     void BindUniformBuffer(VkDescriptorSet set, const Buffer& buffer) {
@@ -1090,6 +1247,13 @@ private:
 
         const float rise = world_.BoardRise(t);
         SetSceneTiming(&uniforms, world_.GrowthTime(t), rise);
+
+        // Spec 8.2. The depth epsilon is small because the real work is done by the slope-scaled
+        // bias in the caster's rasteriser and the normal offset on the receiver; this is only what
+        // is left over, and a larger one here is what makes a shadow crawl out from under the
+        // thing casting it.
+        SetShadow(&uniforms, ShadowViewProj(world_.sky.keyDirection, shadowBounds_), shadowSize_,
+                  ShadowTexelWorldSize(shadowBounds_, shadowSize_), 0.0008f);
 
         // The board lights the city only once it is lit (spec 7.6). Intensity is scaled by how far
         // it has risen as well, so the light does not arrive before the object casting it.
@@ -1232,6 +1396,55 @@ private:
 
         VkRect2D scissor{{0, 0}, extent};
         vkCmdSetScissor(cmd, 0, 1, &scissor);
+    }
+
+    // The key light's depth map (spec 8.2). Once a frame, not once a window: the sun does not
+    // move between monitors, so this follows the fragment simulation's pattern and is recorded
+    // into whichever command buffer opens first.
+    //
+    // Casters are the city and the fragments, which is what a cloud made of a city has to cast.
+    // The terrain does not cast -- it is a nearly flat basin whose own relief is dune-scale -- and
+    // neither does the board.
+    void RecordShadow(const WindowTarget::Frame& frame, Attached& w) {
+        if (!shadowFbo_ || !shadowSize_) return;
+
+        VkClearValue clear{};
+        clear.depthStencil = {1.0f, 0};
+
+        VkRenderPassBeginInfo bi{};
+        bi.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        bi.renderPass        = passes_.shadow;
+        bi.framebuffer       = shadowFbo_;
+        bi.renderArea.extent = {shadowSize_, shadowSize_};
+        bi.clearValueCount   = 1;
+        bi.pClearValues      = &clear;
+
+        vkCmdBeginRenderPass(frame.cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+        SetViewport(frame.cmd, {shadowSize_, shadowSize_});
+
+        if (buildingCount_) {
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowBuildingPipeline_);
+            vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    scenePipelineLayout_, 0, 1, &w.sceneSet[frame.frameSlot], 0,
+                                    nullptr);
+
+            const VkBuffer     buffers[2] = {boxVertices_.handle, buildingInstances_.handle};
+            const VkDeviceSize offsets[2] = {0, 0};
+            vkCmdBindVertexBuffers(frame.cmd, 0, 2, buffers, offsets);
+            vkCmdBindIndexBuffer(frame.cmd, boxIndices_.handle, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(frame.cmd, boxIndexCount_, buildingCount_, 0, 0, 0);
+        }
+
+        if (fragmentSet_ && fragmentLayout_.total && world_.ShellRadius(frameTime_) > 0.0f) {
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowFragmentPipeline_);
+
+            const VkDescriptorSet sets[2] = {w.sceneSet[frame.frameSlot], fragmentSet_};
+            vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fragmentDrawLayout_,
+                                    0, 2, sets, 0, nullptr);
+            vkCmdDraw(frame.cmd, 3, fragmentLayout_.total, 0, 0);
+        }
+
+        vkCmdEndRenderPass(frame.cmd);
     }
 
     void RecordScene(const WindowTarget::Frame& frame, Attached& w) {
@@ -1569,10 +1782,33 @@ private:
         // city rather than the same one again (spec 6.4).
         world_ = world::Generate(settings_, 0);
 
+        FitShadowMap();
+
         // UploadStaticGeometry rebuilds the city and the fragments as well, which is exactly what
         // is wanted here: everything the world owns on the device, from one call.
         if (!UploadStaticGeometry()) {
             app::Log("vulkan: cycle reset failed to rebuild the world");
+        }
+    }
+
+    // The box the shadow map covers, and the map's size. Both belong to a cycle rather than to a
+    // frame: the box is the reach of things this world will produce, and resizing the image is a
+    // device-idle operation, which is exactly what a cycle reset already is.
+    void FitShadowMap() {
+        const world::Detonation& det = world_.detonation;
+
+        // Wide enough for the city, the debris field the shell throws, and the cloud's cap. The
+        // margin is for the wind, which drifts the whole cloud for the back half of the cycle.
+        shadowBounds_.radius =
+            std::fmax(std::fmax(world_.cityRadius, det.reach), det.capRadius + det.capTube) * 1.2f;
+
+        // Tall enough for the cloud, which is the highest thing that casts by a wide margin: the
+        // tallest building is a tenth of it.
+        shadowBounds_.top =
+            std::fmax(world_.city.tallest, det.capHeight + det.capTube) * 1.1f + 10.0f;
+
+        if (!CreateShadowMap(ShadowMapSize(QualityLevel()))) {
+            app::Log("vulkan: shadow map resize failed, shadows are off for this cycle");
         }
     }
 
@@ -2142,6 +2378,23 @@ private:
     // RecordScene, so the board's digits and the scene uniforms cannot disagree about what time
     // it is — which for a countdown is the whole point.
     float frameTime_ = 0.0f;
+
+    // The key light's shadow map (spec 8.2). One image, one framebuffer and one sampler for the
+    // whole renderer: the sun does not vary per monitor, so unlike the exposure and the particle
+    // sort this is not a per-window resource. The size is one of spec 11.2's quality levers and
+    // moves only at a cycle reset, where the device is idle and nothing is in flight.
+    VkFormat      shadowFormat_ = VK_FORMAT_UNDEFINED;
+    uint32_t      shadowSize_   = 0;
+    VkImage       shadowImage_  = VK_NULL_HANDLE;
+    VmaAllocation shadowAlloc_  = VK_NULL_HANDLE;
+    VkImageView   shadowView_   = VK_NULL_HANDLE;
+    VkFramebuffer shadowFbo_    = VK_NULL_HANDLE;
+    VkSampler     shadowSampler_ = VK_NULL_HANDLE;
+    VkPipeline    shadowBuildingPipeline_ = VK_NULL_HANDLE;
+    VkPipeline    shadowFragmentPipeline_ = VK_NULL_HANDLE;
+
+    // The box the map is fitted to, settled with the world at each cycle reset.
+    ShadowBounds  shadowBounds_{};
 
     VkSampler             sampler_               = VK_NULL_HANDLE;
     VkDescriptorSetLayout tonemapSetLayout_      = VK_NULL_HANDLE;

@@ -9,6 +9,7 @@
 
 #include "atmosphere.glsl"
 #include "fire.glsl"
+#include "shadow.glsl"
 
 layout(location = 0) in vec3  vWorldPos;
 layout(location = 1) in vec3  vNormal;
@@ -91,7 +92,8 @@ void main() {
     float lambert  = max(dot(normal, keyDir), 0.0);
     float keyAbove = smoothstep(-0.08, 0.06, keyDir.y);
 
-    vec3 shaded = albedo * scene.keyColor.rgb * lambert * keyAbove;
+    vec3 shaded = albedo * scene.keyColor.rgb * lambert * keyAbove *
+                  KeyShadow(vWorldPos, normal);
 
     // The sky this surface actually sits under, not a single authored constant. At twilight the
     // ambient colour of spec 5.4 is the violet overhead, which ignores the orange band filling

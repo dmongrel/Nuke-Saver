@@ -8,6 +8,7 @@
 
 #include "atmosphere.glsl"
 #include "fire.glsl"
+#include "shadow.glsl"
 
 layout(location = 0) in vec3  vWorldPos;
 layout(location = 1) in vec3  vNormal;
@@ -40,7 +41,8 @@ void main() {
     float lambert  = max(dot(normal, keyDir), 0.0);
     float keyAbove = smoothstep(-0.08, 0.06, keyDir.y);
 
-    vec3 shaded = albedo * scene.keyColor.rgb * lambert * keyAbove;
+    vec3 shaded = albedo * scene.keyColor.rgb * lambert * keyAbove *
+                  KeyShadow(vWorldPos, normal);
 
     vec3 skyAmbient = max(scene.ambientColor.rgb,
                           mix(scene.horizonColor.rgb, scene.zenithColor.rgb, 0.7));

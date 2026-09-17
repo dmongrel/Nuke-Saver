@@ -616,9 +616,38 @@ Auto-exposure is not a nicety. It is the effect that sells the detonation.
 - Phases 0–2 are lit by sun and sky per the time of day, plus window emission.
 - Phases 3–4 add the countdown board as a local source (7.6).
 - From phase 5 the fireball MUST be the dominant light, its intensity following the curve in 5.1,
-  casting the shadows that rake across the debris field.
+  so the debris field is lit from inside the cloud rather than from the sky. It is a light and not
+  a shadow caster; 8.2.1 says which light casts.
 - Exposure MUST adapt over time, and MUST adapt *down* faster than *up* — roughly 0.2 s to darken,
   2–4 s to brighten. The white-out and the slow recovery come from this, not from a scripted fade.
+
+#### 8.2.1 Cast shadows
+
+The key light — sun or moon, whichever 6.2 put in the sky — MUST cast real shadows. It is the one
+light in the scene with a single direction, and at the two times of day the saver spends most of
+its cycles in, morning and twilight, it is low enough that the shadows are the longest thing on
+screen. The fireball is a light but not a shadow caster: it sits inside the cloud rather than
+behind it, it moves every frame, and a second map for it would double the cost of the whole
+feature for an effect that the cloud already hides.
+
+- A single orthographic cascade, refitted once per cycle to a box that covers the city, the debris
+  the shell throws and the cloud at its widest. One map for the renderer, not one per window: the
+  sun does not move between monitors.
+- Casters MUST be the city (7.2) and the fragments (7.3) — a cloud made of a city has to cast the
+  shadow of one. The terrain does not cast: it is a shallow basin whose own relief is dune-scale,
+  and a self-shadowing heightfield at this map resolution reads as noise. Neither does the board.
+- Receivers MUST be the terrain, the city, the fragments and the board, and also the dust
+  particles of 8.3, which are what the settled disc under the cloud is made of. An unshadowed disc
+  directly beneath the cap is the defect this rule exists to prevent. Emissive particles —
+  exhaust, embers — are sources and MUST NOT be shadowed.
+- Only the key terms are attenuated. Sky ambient, the board light and the fireball reach a shaded
+  surface, because none of them comes from the direction the map was rendered from.
+- The map MUST be sampled with a comparison sampler over a neighbourhood, so an edge is soft
+  rather than stair-stepped, and a lookup that falls outside the box MUST come back lit rather
+  than dark.
+- Acne and peter-panning are both defects: the bias MUST be slope-scaled at the caster and offset
+  along the normal at the receiver, rather than a single constant depth epsilon large enough to
+  detach a shadow from the thing casting it.
 
 ### 8.3 Particles
 
@@ -750,6 +779,10 @@ Reference machine: AMD Radeon 8060S, 3440 × 1440 @ 100 Hz.
 - Quality controls, in the order they are sacrificed: fragments per building (300 → 200 → 120 →
   60), particle peak counts, bloom mip count, shadow resolution, terrain LOD distance. Building
   count stays at 500 at every level — the city is the subject.
+- Shadow resolution is 2048² at the top two levels, 1024² at the third and 512² at the fourth.
+  Levels 0 and 1 share a size on purpose: the lever sits fourth in the sacrifice order, so the
+  first step down MUST NOT move it. It is sampled at the cycle reset rather than per frame,
+  because resizing the image needs the device idle.
 - A frame MUST NOT be rendered for a window whose monitor is asleep or whose swapchain reports
   `VK_ERROR_OUT_OF_DATE_KHR`; recreate and continue.
 - Presentation SHOULD prefer `FIFO` and MUST NOT busy-wait to pace frames.
@@ -850,6 +883,9 @@ confirmation it took.
 | A28 | Night and twilight | Stars visible, fixed to sky rather than camera, brightness scaling with ambient; moon reads as the key light at night |
 | A29 | Board glyph scale against skyline | Glyph height comparable to the tallest buildings; digits read as part of the skyline, foreground buildings parallax across them as the camera orbits |
 | A30 | Fresh install, empty registry | Runs at twilight |
+| A31 | Frame at noon and at morning | Buildings cast shadows onto the desert and onto each other; each shadow is attached to the building casting it; no acne on lit faces |
+| A32 | Frame during phase 8 | The cloud casts onto the desert and onto the settled dust disc beneath it; the disc is not the brightest thing in the frame |
+| A33 | Run pinned at each quality level | Shadow map is 2048², 2048², 1024², 512²; level 1 matches level 0 |
 
 ## 15. Out of scope
 

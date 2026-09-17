@@ -23,6 +23,10 @@ constexpr uint32_t kFramesInFlight = 2;
 struct RenderPasses {
     VkRenderPass hdr     = VK_NULL_HANDLE;  // scene -> R16G16B16A16_SFLOAT + depth
     VkRenderPass present = VK_NULL_HANDLE;  // tonemap -> swapchain
+    // The key light's depth map (spec 8.2). Not sized with any window and not owned by one — the
+    // sun is the same for every monitor, so the map is drawn once a frame and read by all of
+    // them. It is here because this is where the passes are made, not because a window uses it.
+    VkRenderPass shadow  = VK_NULL_HANDLE;  // depth only -> sampled
 };
 
 class WindowTarget {
@@ -146,12 +150,18 @@ private:
     uint32_t        frameIndex_ = 0;
 };
 
-// Both render passes, created once and shared by every window because every window uses the
-// same formats.
+// All three render passes, created once and shared by every window because every window uses
+// the same formats.
 bool CreateRenderPasses(Context& ctx, RenderPasses* out);
 void DestroyRenderPasses(Context& ctx, RenderPasses* passes);
 
 VkFormat ChooseDepthFormat(Context& ctx);
+
+// One image, its allocation and a view over it. Shared with the renderer, which makes the shadow
+// map the same way this file makes the HDR target.
+bool CreateImage2D(Context& ctx, uint32_t w, uint32_t h, VkFormat format, VkImageUsageFlags usage,
+                   VkImageAspectFlags aspect, VkImage* image, VmaAllocation* alloc,
+                   VkImageView* view);
 
 }  // namespace render::vk
 

@@ -10,6 +10,7 @@
 
 #include "atmosphere.glsl"
 #include "fire.glsl"
+#include "shadow.glsl"
 
 layout(location = 0) in vec2  vUv;
 layout(location = 1) in vec4  vTint;
@@ -65,7 +66,14 @@ void main() {
         vec3 skyAmbient = max(scene.ambientColor.rgb,
                               mix(scene.horizonColor.rgb, scene.zenithColor.rgb, 0.35));
 
-        vec3 lit = vTint.rgb * scene.keyColor.rgb * wrap * wrap * keyAbove * high;
+        // Dust receives as well as neighbours the casters (spec 8.2). The settled disc under
+        // the cap sits directly in the cloud shadow, and left lit it was the brightest thing on
+        // the desert at the moment the sky above it went dark. Only the two key terms are
+        // shadowed: sky ambient reaches a shaded puff, and so does the fireball, which is inside
+        // the cloud rather than behind it.
+        float keyShadow = KeyShadow(vWorldPos, normal);
+
+        vec3 lit = vTint.rgb * scene.keyColor.rgb * wrap * wrap * keyAbove * high * keyShadow;
 
         // Above one on purpose. Dust is lit from every direction at once, including from the
         // ground it is hanging over, and at the cosine-weighted figure the ground uses it came out
@@ -78,7 +86,7 @@ void main() {
         // a smear of dark paint on the sky.
         float forward = max(-dot(viewDir, scene.keyDirection.xyz), 0.0);
         lit += vTint.rgb * scene.keyColor.rgb *
-               (forward * forward * forward * 1.4 * keyAbove);
+               (forward * forward * forward * 1.4 * keyAbove * keyShadow);
 
         vec3  toBoard   = scene.boardLight.xyz - vWorldPos;
         float boardDist = length(toBoard);

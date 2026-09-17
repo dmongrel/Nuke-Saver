@@ -28,7 +28,16 @@ const float kLogLumMin   = -10.0;
 const float kLogLumRange = 26.0;
 const int   kBins        = 256;
 
-layout(set = 0, binding = 1, std430) buffer Exposure {
+// The tonemap only reads it; the histogram and the adapt pass write it. Same reason as the
+// fragment buffers: a fragment stage that might write needs fragmentStoresAndAtomics, which is
+// not enabled, so the read-only path has to say it is read-only.
+#ifdef EXPOSURE_READONLY
+#define EXPOSURE_ACCESS readonly
+#else
+#define EXPOSURE_ACCESS
+#endif
+
+layout(set = 0, binding = 1, std430) EXPOSURE_ACCESS buffer Exposure {
     float exposure;     // what the tonemap multiplies by; carried across frames
     float initialised;  // 0 until the first adapt has run, so frame 0 does not fade in from black
     float measured;     // the last measured average luminance, for logging

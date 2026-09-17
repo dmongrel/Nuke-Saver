@@ -16,6 +16,7 @@
 layout(set = SCENE_SET, binding = 0, std140) uniform Scene {
     mat4 viewProj;
     mat4 invViewProj;
+    mat4 lightViewProj;  // world -> the key light's clip space (spec 8.2)
 
     vec4 cameraPos;     // xyz world, w = seconds since the cycle began
     vec4 keyDirection;  // xyz towards the light, w = body angular radius
@@ -31,6 +32,7 @@ layout(set = SCENE_SET, binding = 0, std140) uniform Scene {
     vec4 blast;         // xyz impact point, w shell radius
     vec4 fireLight;     // xyz fireball centre, w radius in metres (0 = no fireball)
     vec4 fireColor;     // rgb linear emissive magnitude, w flash intensity
+    vec4 shadow;        // x texel in UV, y texel in metres, z depth bias, w 0 = no shadows
 } scene;
 
 // Reconstructs the world-space view ray for a pixel from its NDC position. Uses the far plane

@@ -33,6 +33,8 @@ VkSurfaceFormatKHR ChooseSurfaceFormat(Context& ctx, VkSurfaceKHR surface) {
 // than the display.
 VkPresentModeKHR ChoosePresentMode() { return VK_PRESENT_MODE_FIFO_KHR; }
 
+}  // namespace
+
 bool CreateImage2D(Context& ctx, uint32_t w, uint32_t h, VkFormat format, VkImageUsageFlags usage,
                    VkImageAspectFlags aspect, VkImage* image, VmaAllocation* alloc,
                    VkImageView* view) {
@@ -69,15 +71,17 @@ bool CreateImage2D(Context& ctx, uint32_t w, uint32_t h, VkFormat format, VkImag
     return vkCreateImageView(ctx.device(), &vci, nullptr, view) == VK_SUCCESS;
 }
 
-}  // namespace
-
 VkFormat ChooseDepthFormat(Context& ctx) {
     const VkFormat candidates[] = {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT,
                                    VK_FORMAT_D24_UNORM_S8_UINT};
     for (VkFormat f : candidates) {
         VkFormatProperties props{};
         vkGetPhysicalDeviceFormatProperties(ctx.physicalDevice(), f, &props);
-        if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) return f;
+        // SAMPLED as well as ATTACHMENT: the same format backs the shadow map, which is read
+        // by four fragment shaders (spec 8.2). Every desktop driver offers both on all three.
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                          VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        if ((props.optimalTilingFeatures & need) == need) return f;
     }
     return VK_FORMAT_UNDEFINED;
 }
@@ -153,6 +157,57 @@ bool CreateRenderPasses(Context& ctx, RenderPasses* out) {
         return false;
     }
 
+    // --- shadow pass: the key light's depth map, no colour at all ---------------------------
+    VkAttachmentDescription shadowAttachment{};
+    shadowAttachment.format         = depthFormat;
+    shadowAttachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+    shadowAttachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    shadowAttachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;  // the whole point of the pass
+    shadowAttachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    shadowAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    shadowAttachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+    shadowAttachment.finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkAttachmentReference shadowDepthRef{0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+    VkSubpassDescription shadowSubpass{};
+    shadowSubpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    shadowSubpass.colorAttachmentCount    = 0;
+    shadowSubpass.pDepthStencilAttachment = &shadowDepthRef;
+
+    // Both directions matter here, and for different reasons. Before: the surface passes of the
+    // previous frame are still sampling this image, and the clear must not start until they have
+    // finished with it. After: every surface pass of this frame reads it, and they must not start
+    // until it is written.
+    VkSubpassDependency shadowDeps[2]{};
+    shadowDeps[0].srcSubpass    = VK_SUBPASS_EXTERNAL;
+    shadowDeps[0].dstSubpass    = 0;
+    shadowDeps[0].srcStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    shadowDeps[0].dstStageMask  = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    shadowDeps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    shadowDeps[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    shadowDeps[1].srcSubpass    = 0;
+    shadowDeps[1].dstSubpass    = VK_SUBPASS_EXTERNAL;
+    shadowDeps[1].srcStageMask  = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    shadowDeps[1].dstStageMask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    shadowDeps[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    shadowDeps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    VkRenderPassCreateInfo shadowInfo{};
+    shadowInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    shadowInfo.attachmentCount = 1;
+    shadowInfo.pAttachments    = &shadowAttachment;
+    shadowInfo.subpassCount    = 1;
+    shadowInfo.pSubpasses      = &shadowSubpass;
+    shadowInfo.dependencyCount = 2;
+    shadowInfo.pDependencies   = shadowDeps;
+
+    if (vkCreateRenderPass(ctx.device(), &shadowInfo, nullptr, &out->shadow) != VK_SUCCESS) {
+        app::Log("vulkan: shadow render pass failed");
+        return false;
+    }
+
     // --- present pass: tonemap into the swapchain ------------------------------------------
     VkAttachmentDescription presentAttachment{};
     presentAttachment.format         = kSwapchainFormat;
@@ -199,6 +254,7 @@ bool CreateRenderPasses(Context& ctx, RenderPasses* out) {
 void DestroyRenderPasses(Context& ctx, RenderPasses* passes) {
     if (passes->hdr) vkDestroyRenderPass(ctx.device(), passes->hdr, nullptr);
     if (passes->present) vkDestroyRenderPass(ctx.device(), passes->present, nullptr);
+    if (passes->shadow) vkDestroyRenderPass(ctx.device(), passes->shadow, nullptr);
     *passes = {};
 }
 

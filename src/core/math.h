@@ -236,6 +236,22 @@ inline Mat4 Perspective(float fovYRadians, float aspect, float zNear, float zFar
     return r;
 }
 
+// The same clip space, without the divide. The shadow map's light is directional, so its frustum
+// is a box rather than a cone: the bounds are given in view space, with zNear and zFar as
+// distances in front of the eye, exactly as Perspective takes them.
+inline Mat4 Orthographic(float left, float right, float bottom, float top, float zNear,
+                         float zFar) {
+    Mat4 r{};
+    r.m[0][0] = 2.0f / (right - left);
+    r.m[1][1] = -2.0f / (top - bottom);  // Vulkan's NDC Y points down, as above
+    r.m[2][2] = -1.0f / (zFar - zNear);
+    r.m[3][0] = -(right + left) / (right - left);
+    r.m[3][1] = (top + bottom) / (top - bottom);
+    r.m[3][2] = -zNear / (zFar - zNear);
+    r.m[3][3] = 1.0f;
+    return r;
+}
+
 }  // namespace core
 
 #endif

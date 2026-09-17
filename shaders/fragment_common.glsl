@@ -52,9 +52,20 @@ const float kFragGather  = 3.0;  // drawn toward its place on the mushroom (spec
 #define FRAGMENT_SET 0
 #endif
 
+// The draw passes only read. Saying so is not an optimisation: a storage buffer a vertex or
+// fragment stage might write has to be backed by vertexPipelineStoresAndAtomics or
+// fragmentStoresAndAtomics, and this device enables neither -- so an undecorated buffer here is a
+// pipeline the validation layer rejects outright and the driver is free to mishandle.
+// FRAGMENT_NO_PUSH marks exactly the passes that draw rather than simulate.
+#ifdef FRAGMENT_NO_PUSH
+#define FRAGMENT_ACCESS readonly
+#else
+#define FRAGMENT_ACCESS
+#endif
+
 layout(std430, set = FRAGMENT_SET, binding = 0) readonly buffer BoxBuffer { ShatterBox boxes[]; };
-layout(std430, set = FRAGMENT_SET, binding = 1) buffer RestBuffer { FragRest rest[]; };
-layout(std430, set = FRAGMENT_SET, binding = 2) buffer StateBuffer { FragState state[]; };
+layout(std430, set = FRAGMENT_SET, binding = 1) FRAGMENT_ACCESS buffer RestBuffer { FragRest rest[]; };
+layout(std430, set = FRAGMENT_SET, binding = 2) FRAGMENT_ACCESS buffer StateBuffer { FragState state[]; };
 
 #ifndef FRAGMENT_NO_PUSH
 layout(push_constant) uniform FragmentPush {

@@ -10,6 +10,7 @@
 
 #define SCENE_SET 0
 #define PARTICLE_SET 1
+#define PARTICLE_READONLY
 #include "scene.glsl"
 #include "particle_common.glsl"
 

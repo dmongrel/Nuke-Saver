@@ -32,9 +32,18 @@ const uint kSortBuckets = 256u;
 // [0, total) holds the alpha-blended particles ordered far to near, [total, 2*total) holds the
 // additive ones in whatever order they were scattered, because additive blending commutes.
 // Unused entries hold kParticleNone and the vertex shader collapses them to a degenerate triangle.
-layout(std430, set = PARTICLE_SET, binding = 0) buffer SortBuffer { uint sorted[]; };
+// The draw pass only reads the sorted order; the three sort passes build it. Undecorated, a
+// storage buffer a vertex stage might write needs vertexPipelineStoresAndAtomics, which is not
+// enabled -- so the read-only path has to say so or the pipeline is invalid.
+#ifdef PARTICLE_READONLY
+#define PARTICLE_ACCESS readonly
+#else
+#define PARTICLE_ACCESS
+#endif
 
-layout(std430, set = PARTICLE_SET, binding = 1) buffer BinBuffer {
+layout(std430, set = PARTICLE_SET, binding = 0) PARTICLE_ACCESS buffer SortBuffer { uint sorted[]; };
+
+layout(std430, set = PARTICLE_SET, binding = 1) PARTICLE_ACCESS buffer BinBuffer {
     uint count[kSortBuckets];   // particles per depth bucket
     uint cursor[kSortBuckets];  // running write position, seeded from the prefix sum
     uint additive;              // how many additive particles have been appended

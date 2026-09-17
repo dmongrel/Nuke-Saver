@@ -1,0 +1,653 @@
+# nuke-saver: Build Specification
+
+Status: draft, third revision — more specs to follow
+Target: Windows 10 1903+ / Windows 11, x86-64
+Deliverable: `nuke-saver.scr`, a native Win32 screen saver rendering with Vulkan
+
+This document is the source of truth for what nuke-saver does and looks like. The staged
+engineering work — milestones, module layout, dependency setup — lives in
+[`Nuke-Saver-Implementation-Plan.md`](Nuke-Saver-Implementation-Plan.md); where the two
+overlap, this document wins on behavior and the plan wins on sequencing.
+
+Keywords: **MUST** is a hard requirement. **SHOULD** is expected unless there is a stated
+reason not to. **MAY** is optional.
+
+Revisions:
+
+- 2026-09-17: initial spec. Owner direction: a screen saver showing a simulated nuclear
+  detonation over a desert city, C++, Vulkan, real-time, not physically accurate.
+- 2026-09-17: owner direction, second pass. The scenario is rewritten end to end: the land
+  starts empty, a 500-building city grows out of it, a 7-segment countdown runs, a missile
+  flies in, and the city shatters into triangles that scatter and then reassemble into the
+  mushroom cloud. Colour authoring is now specified (section 5, HDR-ready linear values,
+  ±10% per-instance variation). Time of day expands to four settings. The raymarched
+  volumetric cloud of revision 1 is **withdrawn** — the cloud is made of the city's own
+  triangles (section 7.5).
+- 2026-09-17: owner direction, third pass. Q2 and Q4 resolved. The countdown is now a
+  **world object** — a physical display standing over the city, lighting it, and destroyed
+  by the blast along with everything else (section 7.6). The mushroom cloud **disperses**
+  rather than holding: a new phase releases the fragments to rain back over the ruins
+  (section 7.7). The cycle is renumbered to eleven phases.
+- 2026-09-17: owner direction, third pass addendum. The camera **orbits the city continuously**
+  for the whole cycle and is never static (section 11.1). This forced a change to the countdown
+  board: a single fixed face would turn away from an orbiting camera mid-countdown, so the board
+  now carries four faces (section 7.6).
+
+---
+
+## 1. Purpose
+
+nuke-saver is a screen saver. An empty desert basin builds itself a city, a countdown board
+over the rooftops runs out, a missile arrives, and the city is blown apart into a storm of
+triangles that gathers itself back into a mushroom cloud — then lets go, and rains what is
+left over the ruins. Then the land is empty again and it starts over.
+
+The simulation is **theatrical, not physical**. Nothing here models yield, neutron transport,
+overpressure or fallout. Every effect is whatever cheap approximation sells the look at frame
+rate.
+
+The project is not a targeting aid, a weapons-effects estimator or a training tool, and MUST
+NOT present its output as predictive of anything. It is a light show.
+
+## 2. Source of truth
+
+| Source | Describes | Status |
+|---|---|---|
+| Owner direction, 2026-09-17 (third pass) | World-space countdown board, dispersing mushroom cloud | **Authoritative** |
+| Owner direction, 2026-09-17 (second pass) | Growth, countdown, missile, triangle destruction and triangle mushroom, colour rules, four times of day | Authoritative where the third pass is silent |
+| Owner direction, 2026-09-17 (first pass) | Screen saver, desert city, nuclear detonation, C++, Vulkan, real-time, non-physical | Authoritative where later passes are silent |
+| `main.cpp` (commit `911badf`) | Win32 screensaver skeleton: `wWinMain`, `/s` `/p` `/c`, black window | Valid scaffolding. Section 9 extends it. |
+| `Makefile`, `nuke-saver.rc`, `nuke-saver.manifest` (commit `911badf`) | MinGW/g++/windres build of a `.scr` | Valid, but section 13 changes the standard and adds dependencies. |
+| `docs/ghost-saver-spec.md` (sibling project) | Screen-saver host behavior conventions | **Authoritative** for `/s` `/p` `/c` semantics and exit conditions, which nuke-saver copies. |
+| Revision 1, section 6.3 (raymarched volumetric cloud) | A marched analytic density field | **Withdrawn.** Do not implement. Section 7.5 replaces it. |
+| Revision 2, section 7.6 (screen-space countdown overlay) | A 2D HUD readout | **Withdrawn.** Do not implement. Section 7.6 replaces it. |
+| `README.md` | "Scaffolding only" | Stale once M1 lands. Rewrite at that point. |
+
+## 3. Scope of this revision
+
+Specified here: the run cycle and its eleven phases, the world, colour authoring, the
+rendering approach, the screensaver modes, settings, the performance budget, failure behavior
+and the build.
+
+Deferred, listed so nobody designs around their absence: audio; HDR display output; any
+second detonation type; weather or wind beyond a constant drift direction.
+
+## 4. Run cycle
+
+### 4.1 Phase table
+
+One cycle runs 80–115 seconds, then repeats with a new seed. Durations marked *random* are
+drawn per cycle, uniformly, from the stated range.
+
+| # | Phase | Duration | What the viewer sees |
+|---:|---|---|---|
+| 0 | Empty land | 5–8 s *random* | Bare desert basin. No city, no marks on the ground. The camera is already moving. |
+| 1 | Growth | 5–10 s *random* | 500 buildings rise out of the ground, staggered, until the city stands complete. The countdown board rises with them, last. See 6.4. |
+| 2 | Settle | 2–3 s *random* | The finished city, still, the board dark. Nothing happens. This beat exists so the countdown lands on a stable frame. |
+| 3 | Countdown | exactly 5 s | The board lights: `00:00:05` counting to `00:00:00`, throwing its own light across the rooftops. See 7.6. |
+| 4 | Missile | 2.5–4 s *random* | A missile enters frame from off screen and runs down to the city centre, trailing exhaust. The board holds at `00:00:00`. |
+| 5 | Flash | 0.3 s | On impact the screen goes fully white over ~120 ms and holds. |
+| 6 | Blast | 4–6 s *random*, overlaps 7 | A refractive spherical shell expands fast from the impact point. Every building it touches — and the board — bursts into triangles. |
+| 7 | Scatter | 5 s exactly | Triangles fly outward from the centre, tumbling, gravity dragging them down until they are skidding and settling on the desert floor. |
+| 8 | Gather | 25–35 s *random* | The pull reverses. Every triangle is drawn back toward the city centre and lifted, converging into a mushroom cloud built entirely out of the city that was there. The cap rolls over and the cloud turns. |
+| 9 | Disperse | 15–25 s *random* | The cloud lets go. Fragments are released from the shape and fall, thinning the cloud from the bottom up, raining back down over the ruins and settling. |
+| 10 | Fade | 8 s | To black over the settled debris field. State torn down, new seed drawn, empty land again. |
+
+Phases 3 and 4 MUST NOT overlap: the countdown reaches zero, *then* the missile appears.
+Phase 6 MUST overlap phase 7 — the blast front is still expanding while the nearest triangles
+are already flying.
+
+### 4.2 Timing
+
+- The clock MUST come from `QueryPerformanceCounter`, never from frame counts or accumulated
+  `Sleep`.
+- Every animated quantity MUST be a function of elapsed seconds, so frame rate affects
+  smoothness and nothing else.
+- Frame delta MUST be clamped to 100 ms before it reaches the simulation, so a stall does not
+  fling triangles across the map.
+- Phase 3 MUST run exactly 5.000 s of wall clock. A countdown that drifts against its own
+  displayed digits is a defect.
+- A cycle MUST be reproducible from its seed: same city, same missile approach, same gross
+  cloud shape. Per-frame jitter from delta timing is exempt.
+
+## 5. Colour
+
+This section governs every colour in the project. It is short, and it is not negotiable
+per-effect.
+
+### 5.1 HDR-ready authoring
+
+- All colour MUST be authored and computed in **linear scene-referred** space. sRGB encoding
+  happens once, in the tonemap pass, and nowhere else.
+- Surface albedo is in 0–1. Light and emission are **not** clamped to 1: the flash, the
+  fireball and the countdown segments MUST carry values well above 1.0 so that bloom and
+  auto-exposure have something real to work with. An emissive authored at 1.0 will look flat
+  and is a defect.
+- Reference emissive magnitudes, relative to a mid-grey lit by the noon sun at 1.0:
+
+| Source | Linear emissive |
+|---|---:|
+| Building windows, night | 2 – 5 |
+| Countdown board, lit segments | 30 – 60 |
+| Missile exhaust | 20 – 40 |
+| Detonation flash, peak | 8,000 – 15,000 |
+| Fireball, phase 6 start | 2,000 – 4,000 |
+| Fireball, phase 6 end | 20 – 60 |
+| Embers, phases 8–9 | 5 – 15 |
+
+The countdown board is far brighter than a window because it is a light source in its own
+right (7.6), not a lit surface.
+
+- The HDR path is internal. Output to the swapchain is SDR; HDR *display* output is out of
+  scope (section 15).
+
+### 5.2 Per-instance variation
+
+A screen saver that draws 500 boxes in one grey looks like 500 boxes in one grey. Every colour
+in the scene MUST vary.
+
+- Each instance MUST offset its base colour by a stable per-instance random of **±10%** unless
+  a different figure is given below.
+- The offset MUST be applied in HSV and then converted, not by scaling RGB — scaling RGB
+  changes brightness and leaves hue flat, which is the thing this rule exists to prevent. Hue
+  ±10% of the stated hue range, saturation ±10%, value ±10%, each drawn independently.
+- The random MUST be derived from the instance's ID and the cycle seed, so it is stable for
+  the whole cycle and reproducible across runs.
+- Fragments inherit their parent building's varied colour (section 7.3), so the cloud in phase
+  8 carries the city's colour spread rather than averaging to mud.
+
+### 5.3 Base palette
+
+Hues are given as ranges; the ±10% of 5.2 applies on top.
+
+| Surface | Base | Variation |
+|---|---|---|
+| Desert floor | Brown, hue 25–35°, sat 0.35–0.50, val 0.35–0.55 | ±10% |
+| Rock and mesa | Brown-grey, hue 20–30°, sat 0.15–0.30, val 0.30–0.45 | ±10% |
+| Building body | Concrete grey, hue 20–40°, sat 0.02–0.12, val 0.35–0.70 | ±10% |
+| Building windows | Blue-grey, hue 195–215°, sat 0.10–0.30, val 0.25–0.60 | ±15% |
+| Countdown board frame | Dark grey, sat 0.00–0.08, val 0.10–0.20 | ±10% |
+| Countdown segments, lit | Amber-red, hue 5–20°, sat 0.85–1.00 | ±5% |
+| Countdown segments, unlit | Board frame colour, darkened 40% | inherited |
+| Missile body | Neutral grey-white, sat 0.00–0.05, val 0.70–0.85 | ±10% |
+| Fragment edges | Parent colour, darkened 15–30% | inherited |
+| Settled dust | Desert floor colour, desaturated 40% | ±10% |
+
+Lit-segment variation is tightened to ±5% because eight glyphs of the same display visibly
+mismatching reads as a bug, not as variety.
+
+### 5.4 Time of day
+
+Four settings, selectable or random per cycle (section 10). Each MUST change sun angle, sun
+colour, sky gradient and base exposure together — a time of day that only tints the sky is not
+done.
+
+| | Sun elevation | Sun colour | Sky | Notes |
+|---|---:|---|---|---|
+| Morning | 12–20° | Warm, ~4,500 K | Pale blue overhead, warm haze at the horizon | Long shadows running one way |
+| Noon | 70–85° | Neutral, ~6,500 K | Strong blue, tight horizon haze | Short hard shadows, highest contrast on building faces |
+| Twilight | 2–6°, below horizon at the low end | Deep orange-red, ~2,200 K | Orange to violet gradient, strong horizon band | Best contrast for the fireball. Buildings read as silhouettes. |
+| Night | Sun below horizon | None; moon fill only, ~7,500 K, dim | Near-black with a faint gradient, stars MAY be drawn | City is lit by its own windows and the board. The flash is at its most violent here. |
+
+Window emission MUST scale inversely with ambient light: barely visible at noon, a main source
+of city light at night.
+
+## 6. The world
+
+### 6.1 Generation, not assets
+
+The world MUST be generated procedurally at cycle start from a 64-bit seed. The `.scr` MUST
+NOT load external model, texture or level files at runtime, and MUST remain a single
+self-contained executable. This is a screen saver: it gets copied into `System32` by itself,
+and anything it cannot carry inside its own resource section does not exist.
+
+### 6.2 Terrain
+
+- A desert basin extending to a visible horizon. Nominal extent 8 km × 8 km, with distant
+  terrain carried by a skirt mesh or a horizon impostor.
+- Height from summed fBm noise, 5–7 octaves, ridged at the low frequencies for a few mesas and
+  a shallow rim of hills, flattened where the city will stand.
+- Chunked LOD grid. The horizon MUST NOT visibly pop.
+- Colour per section 5.3. Dunes are normal-map detail, not geometry.
+- The floor MUST darken and scorch inside the blast radius during phase 6, and MUST stay
+  scorched through phase 10.
+
+### 6.3 The city
+
+**500 buildings, hard limit for this revision.** Each is a rectangular or square box — nothing
+else. No setbacks, no crowns, no roof furniture, no masts. The silhouette comes from the
+distribution of box dimensions, not from detail.
+
+Generated in this order:
+
+1. **Extent.** A roughly circular footprint, 1.2–2 km across, at the basin centre.
+2. **Roads.** A primary grid rotated by a random angle, with 1–3 arterials cutting across.
+   Blocks are the cells left over.
+3. **Lots.** Blocks subdivided by recursive splitting until 500 lots exist. Excess lots are
+   discarded from the outside in, so the city stays dense at the centre.
+4. **Boxes.** One box per lot. Footprint square or rectangular, aspect between 1:1 and 1:2.5.
+   Height drawn from a distribution whose mean falls off with distance from the centre, so a
+   downtown emerges without anybody authoring one.
+
+Requirements:
+
+- All 500 MUST be drawn from **one** unit-cube mesh, instanced. Per-instance data is transform,
+  colour, growth time and fragment range — nothing more.
+- Windows MUST be shader-generated from surface UV, not textured, with a stable per-window
+  random on/off state (section 5.4).
+- Two consecutive cycles sharing a skyline is a defect.
+
+### 6.4 Growth (phase 1)
+
+- Each building is assigned a start time spread across the phase duration, weighted so the
+  centre starts first and the outskirts follow. The city grows outward.
+- A building rises from zero height to full height over 0.4–0.9 s, scaling on Y only, with an
+  ease-out so it decelerates into place. It MUST NOT overshoot or bounce.
+- A building MUST NOT be visible before its start time.
+- A small dust puff at the base on emergence is permitted and encouraged.
+- The countdown board (7.6) rises **last**, after the final building, so the eye is left on it
+  going into phase 2.
+- Everything MUST be standing before phase 2 ends.
+
+## 7. The detonation
+
+### 7.1 Missile (phase 4)
+
+- One procedurally generated mesh: a cylinder body, a cone nose, four fins. No asset.
+- Enters from off screen at a random compass bearing and a shallow descent, reaching the city
+  centre exactly at the end of the phase. Speed MUST be constant enough to read as deliberate
+  rather than falling.
+- Carries an emissive exhaust plume (5.1) and a smoke trail persisting a few seconds behind it.
+- Camera framing MUST guarantee the missile is on screen for at least the last 2 s of its run.
+  A missile that arrives unseen wastes the phase.
+- At impact the missile is destroyed. It MUST NOT be visible in phase 5 or later.
+
+### 7.2 Flash and blast (phases 5–6)
+
+- **Flash.** Screen goes fully white over ~120 ms and holds for the remainder of phase 5.
+  Driven by emissive magnitude and auto-exposure (8.2), with a tonemapper clamp toward white to
+  guarantee full saturation.
+- **Blast wave.** An expanding spherical shell centred on the impact point, rendered with a
+  **refractive shader**: the shell offsets the screen-space UV of everything behind it,
+  strongest at the shell surface, falling off sharply on both sides. It MUST be visible as a
+  distinct moving boundary, not a general blur.
+- The shell expands fast at first and decelerates. It MUST cross the whole city inside phase 6.
+- A ground ring of stripped dust MUST expand with it, slightly ahead of the shell at ground
+  level.
+- A fireball — emissive sphere with noise-displaced surface, cooling white → yellow → orange →
+  deep red per 5.1 — sits at the centre and is the dominant light source for phases 6 and 7.
+
+### 7.3 Fragmentation
+
+The centre of the whole project. Buildings do not collapse; they cease to be buildings.
+
+- When the blast shell reaches a building, that building is **replaced** by its fragments in the
+  same frame. There is no partial state and no damaged-building model.
+- Each building shatters into **200–300 triangles**, giving roughly 125,000 fragments across the
+  city. The count per building MUST scale with the quality level (11.2).
+- The countdown board fragments on the same rule, into 400–600 triangles because it is larger
+  and closer to the centre. Its fragments keep the board's colours, so the cloud carries visible
+  streaks of amber and dark grey through it.
+- Fragments are generated by subdividing faces on a jittered grid, so they are small, irregular,
+  and visibly triangular rather than uniform.
+- Each fragment is an independent body: position, orientation, linear velocity, angular velocity,
+  and the parent's varied colour (5.2).
+- Fragments MUST be simulated on the GPU in compute and drawn in one instanced call. The CPU MUST
+  NOT touch per-fragment data.
+- Fragments are double-sided and unlit on their back face, so a tumbling cloud flickers with
+  contrast instead of going flat.
+
+### 7.4 Scatter (phase 7)
+
+Exactly 5 seconds. The forces, in order of magnitude:
+
+1. **Radial impulse**, applied once at fragmentation: outward from the explosion centre,
+   magnitude falling off with distance, ±20% random per fragment so the front is ragged.
+2. **Gravity**, constant, downward.
+3. **Drag**, light, so fragments do not accelerate forever.
+4. **Tumble**: angular velocity set at fragmentation from the impulse, then held.
+
+- Fragments MUST collide with the ground plane and settle: on contact, kill the vertical
+  component, scrub most of the horizontal, damp the spin. They skid and stop.
+- By the end of the phase the majority MUST be on or near the ground, spread well outside the
+  city footprint. The frame at t+5 s should read as a flat debris field with the fireball above
+  it.
+
+### 7.5 Gather and the mushroom (phase 8)
+
+The pull reverses. This is what the scatter exists to set up.
+
+- Every fragment, grounded or airborne, is released from rest and drawn toward the city centre.
+  Grounded fragments MUST visibly lift off rather than teleport.
+- Each fragment is assigned a **target position on an analytic mushroom shape** — a torus cap
+  over a tapering stem, with cap radius and stem height growing over the phase. Assignment MUST
+  be stable for the cycle: fragments that started near the centre go to the stem, fragments from
+  the outskirts go to the cap rim.
+- Fragments move toward their target under a spring with damping, plus a slow curl-noise swirl so
+  the surface churns and the cloud never looks like a solid model. They MUST NOT snap into place;
+  convergence should take most of the phase.
+- Once converged the cloud MUST keep turning: the cap rolls outward and over, reading as a vortex
+  ring, and the whole thing drifts slowly in one constant wind direction.
+- Fragments retain their building colours throughout, so the cloud reads as the city it was made
+  of. Fragments MAY be tinted toward the fireball's colour near the stem base, falling off with
+  height.
+- Embers (5.1) rise through the stem.
+
+This replaces revision 1's raymarched volumetric cloud entirely. There is no density field and
+no march.
+
+### 7.6 Countdown board (phases 1–6)
+
+A physical object in the world, not an overlay. It is built with the city, it lights the city,
+and the blast takes it apart with everything else.
+
+**Form**
+
+- A freestanding display board on a lattice mast at the city centre, its face carrying eight
+  7-segment glyphs reading `HH:MM:SS` — six digits and two colons.
+- The board MUST stand clear of the skyline: its base is at or above the height of the tallest
+  building, so no building ever occludes the digits.
+- Nominal face 140 m wide by 40 m tall. Scale it with the city's extent rather than fixing it, so
+  a small city does not get a billboard twice its width.
+- Segments are **geometry**, not a texture: extruded bars on a recessed dark board face.
+
+**Orientation**
+
+The camera orbits continuously (11.1), so a single-faced sign would turn away from it partway
+through the countdown. The board solves this the way real stadium displays do — with more faces,
+not with rotation.
+
+- The board MUST carry **four identical faces** on a square mast, one per compass quadrant, each
+  showing the same time. From any bearing on the orbit, at least one face is square-on and
+  readable.
+- Yaw MUST be fixed at cycle start and held. The board MUST NOT billboard, and MUST NOT rotate to
+  follow the camera. A sign that turns with the viewer destroys the illusion that it is a physical
+  object, which is the entire reason it is one.
+- Yaw MAY be offset by a random angle per cycle, so the camera does not always meet a face
+  head-on at the same moment.
+- All four faces MUST update in the same frame. A face showing a stale digit is a defect.
+
+**Behavior**
+
+- Rises last during phase 1 (6.4), dark.
+- Dark through phase 2.
+- Lights at the start of phase 3 showing `00:00:05`, stepping to `00:00:00` once per second.
+- Holds `00:00:00`, still lit, through phase 4.
+- Goes dark at the flash and fragments when the shell reaches it in phase 6.
+- Unlit segments MUST be visible as dark recessed bars, the way real 7-segment hardware looks. A
+  display where unlit segments vanish is a defect.
+
+**Light**
+
+- Lit segments are emissive at 30–60 linear (5.1) and MUST bloom.
+- The board MUST be a real light source: an area or point light at its face, amber, illuminating
+  the rooftops and upper storeys beneath it. At night this MUST be plainly visible as the
+  dominant light on the city. At noon it MAY be subtle, but it MUST NOT be absent.
+- Segment geometry MUST be generated procedurally from the digit value. No font, no texture, no
+  glyph atlas — consistent with 6.1.
+
+### 7.7 Disperse (phase 9)
+
+The cloud does not hold. Having assembled itself, it comes apart.
+
+- Fragments are released from their mushroom targets progressively, **bottom up**: the stem
+  empties first, then the cap from its underside outward, so the silhouette thins and sags rather
+  than dissolving uniformly.
+- Release MUST be staggered across the phase, not applied to all fragments at once. A cloud that
+  drops in a single frame is a defect.
+- On release a fragment returns to the phase 7 force model — gravity, drag, tumble — with a small
+  outward nudge inherited from the cap's rotation, so cap fragments fan out as they fall.
+- Fragments falling through the fireball's remaining light MUST pick it up, so the fall is a rain
+  of lit debris rather than silhouettes.
+- Fragments settle on the ground on contact, under the same rule as 7.4.
+- By the end of the phase the cloud MUST be gone and the majority of fragments MUST be at rest,
+  leaving a debris field over the scorched footprint for the phase 10 fade.
+- Embers continue to rise through the falling debris, giving the frame movement in both
+  directions at once.
+
+## 8. Rendering
+
+### 8.1 Pipeline
+
+Forward renderer, HDR throughout, targeting Vulkan 1.2 core with no hard extension requirement
+beyond a swapchain.
+
+```
+depth prepass
+  -> opaque forward (terrain, buildings, board, missile, fragments) -> HDR R16G16B16A16_SFLOAT
+  -> fireball (emissive sphere, depth-tested)
+  -> transparent particles (dust, smoke, embers; sorted)
+  -> blast refraction (screen-space, phases 6-7 only)
+  -> bloom (downsample chain, 5-6 mips, tent-filter upsample)
+  -> auto-exposure (compute histogram, adapt)
+  -> tonemap (ACES) + dither -> swapchain B8G8R8A8_UNORM
+```
+
+The volumetric pass of revision 1 is gone. Fragments are opaque geometry, which is both cheaper
+and sharper than marching a density field. The countdown overlay pass of revision 2 is also gone:
+the board is world geometry and goes through the forward pass with everything else.
+
+### 8.2 Light and exposure
+
+Auto-exposure is not a nicety. It is the effect that sells the detonation.
+
+- Phases 0–2 are lit by sun and sky per the time of day, plus window emission.
+- Phases 3–4 add the countdown board as a local source (7.6).
+- From phase 5 the fireball MUST be the dominant light, its intensity following the curve in 5.1,
+  casting the shadows that rake across the debris field.
+- Exposure MUST adapt over time, and MUST adapt *down* faster than *up* — roughly 0.2 s to darken,
+  2–4 s to brighten. The white-out and the slow recovery come from this, not from a scripted fade.
+
+### 8.3 Particles
+
+Separate from fragments (7.3), which are their own system.
+
+| System | Peak live | Phases |
+|---|---:|---|
+| Growth puffs | 10,000 | 1 |
+| Missile exhaust and trail | 15,000 | 4 |
+| Ground collar dust | 30,000 | 6–7 |
+| Settled dust | 20,000 | 7–10 |
+| Embers | 8,000 | 8–9 |
+
+GPU-simulated, instanced camera-facing quads, sorted back to front where alpha-blended. Peak
+counts scale with quality.
+
+## 9. Screensaver behavior
+
+### 9.1 Modes
+
+Argument parsing, prefixes and case-insensitivity MUST match ghost-saver exactly. The skeleton in
+`main.cpp` already does this and MUST NOT be reworked.
+
+| Argument | Behavior |
+|---|---|
+| (none) / `/s` | Full-screen simulation on every monitor |
+| `/p <hwnd>` / `/p:<hwnd>` | Preview in the host's child window — **no Vulkan**, see 9.3 |
+| `/c` / `/c:<hwnd>` | Settings dialog, see section 10 |
+| anything else | Exit 0 immediately |
+
+### 9.2 Full-screen and multiple monitors
+
+- One borderless top-most popup window per monitor, sized to that monitor's bounds. The single
+  virtual-desktop window ghost-saver uses is **not** adequate: it forces one swapchain across
+  displays that may differ in DPI, refresh rate and HDR state.
+- All windows MUST share one `VkInstance`, one `VkPhysicalDevice` and one `VkDevice`, and one copy
+  of every mesh, pipeline and simulation buffer. Only the swapchain and its per-image resources
+  are per window.
+- Every monitor MUST show the same simulation at the same instant, from its own camera, with its
+  own aspect.
+- The cursor MUST be hidden.
+- Input MUST tear the whole process down, not just the window that received it. Any `WM_KEYDOWN`,
+  `WM_SYSKEYDOWN`, mouse button, or mouse move beyond a small dead zone on any window MUST exit.
+  The first `WM_MOUSEMOVE` after startup MUST be swallowed, because Windows delivers one
+  immediately.
+- On exit the process MUST wait for device idle before destroying anything, and MUST leave no GPU
+  allocations outstanding.
+
+### 9.3 Preview
+
+Preview windows are a few hundred pixels across and the host may destroy them at any moment.
+Standing up a Vulkan device for that is not worth the risk or the wait.
+
+- Preview MUST NOT initialise Vulkan.
+- It MUST cross-fade slowly between a small number of stills baked into the executable's
+  resources — frames captured from a real run, one per major phase.
+- It MUST survive its parent window vanishing.
+
+## 10. Settings
+
+Stored under `HKCU\Software\nuke-saver`. Every value has a working default; a fresh install MUST
+run correctly against an empty registry key.
+
+| Value | Type | Default | Meaning |
+|---|---|---|---|
+| `Quality` | DWORD | 0 | 0 = auto (11.2), 1 = low, 2 = medium, 3 = high |
+| `TimeOfDay` | DWORD | 0 | 0 = random per cycle, 1 = morning, 2 = noon, 3 = twilight, 4 = night |
+| `CameraMode` | DWORD | 0 | 0 = random shot per cycle, 1–4 = pin to one shot type |
+
+The `/c` dialog MUST expose these three and nothing else, and MUST be a plain Win32 dialog
+resource.
+
+## 11. Camera and performance
+
+### 11.1 Camera
+
+**The camera is never still.** It orbits the city for the whole cycle, so the scene is always
+moving even when nothing in it is. A static shot of a static city is exactly the failure this
+project cannot afford — it is a screen saver, and a still frame is the one thing it must never
+show.
+
+- The camera MUST follow a continuous orbit around the city centre for the entire cycle, from the
+  first frame of phase 0 to the last frame of phase 10. It MUST NOT stop, hold, or cut at any
+  point, including during the countdown.
+- Orbit rate MUST be slow enough to read as drift rather than as a turntable: a full revolution
+  SHOULD take 4–8 minutes, so one cycle sweeps 30–90° of arc, not a full circle.
+- Radius, height and look-at MUST also vary slowly and independently over the cycle — easing in
+  or out, rising or descending — so the motion is not a flat circular track. Each cycle draws its
+  own combination from a small library of shot types: distant ridge orbit, low fast orbit across
+  the desert floor, high oblique descending orbit, close orbit rising from street level.
+- Direction of travel MUST be randomised per cycle.
+- The framing solver runs before the cycle starts and MUST satisfy all of these across the whole
+  orbit arc, without a cut or a zoom: the city fits during phase 1; the countdown board is legible
+  through phases 3 and 4 (7.6 gives the board four faces so the orbit cannot defeat this); the
+  missile is on screen for its last 2 s; the full cloud fits at its widest in phase 8; the settled
+  debris field fits in phase 10.
+- Cloud framing is the binding constraint — it is the widest thing in the cycle — so the solver
+  MUST size the orbit radius from phase 8 and then check the rest against it.
+- A brief damped jolt when the blast front passes the camera is permitted. Nothing else
+  interrupts the motion.
+- Aspect-aware, so the shot works at 16:9 and 21:9 without cropping the cloud.
+
+### 11.2 Performance
+
+Reference machine: AMD Radeon 8060S, 3440 × 1440 @ 100 Hz.
+
+- Target 60 FPS sustained at native resolution at `medium`. This is a screen saver; it MUST NOT
+  work the GPU harder than it needs to.
+- The renderer MUST measure its own frame time over a rolling window and, in `auto`, step down
+  after missing budget for 2 s and back up after beating it with margin for 10 s, damped so it
+  does not oscillate.
+- Quality controls, in the order they are sacrificed: fragments per building (300 → 200 → 120 →
+  60), particle peak counts, bloom mip count, shadow resolution, terrain LOD distance. Building
+  count stays at 500 at every level — the city is the subject.
+- A frame MUST NOT be rendered for a window whose monitor is asleep or whose swapchain reports
+  `VK_ERROR_OUT_OF_DATE_KHR`; recreate and continue.
+- Presentation SHOULD prefer `FIFO` and MUST NOT busy-wait to pace frames.
+
+## 12. Failure behavior
+
+- Vulkan MUST be loaded dynamically at runtime. The executable MUST NOT import `vulkan-1.dll`
+  statically, so a machine with no Vulkan runtime still launches it.
+- If the loader is missing, no suitable device exists, device creation fails, or a required format
+  is unsupported, the saver MUST fall back to a plain black GDI screen saver that still exits on
+  input. It MUST NOT show an error dialog and MUST NOT exit immediately — either looks like a
+  crash to whoever set it.
+- Device loss MUST be caught: one full teardown and re-init, then the GDI fallback.
+- Any unhandled failure path MUST end with the process exiting 0, quietly.
+
+## 13. Build
+
+### 13.1 Language standard
+
+`-std=c++11` MUST be raised to `-std=c++17`. Nothing here needs C++20, and staying at 17 keeps
+MinGW's static runtime uncomplicated.
+
+### 13.2 Dependencies
+
+Neither of the first two is installed on the current machine; M0 in the plan handles that.
+
+| Dependency | Why | How |
+|---|---|---|
+| Vulkan headers | Building at all | `pacman -S mingw-w64-ucrt-x86_64-vulkan-devel` |
+| `glslc` | Compiling GLSL to SPIR-V | `pacman -S mingw-w64-ucrt-x86_64-shaderc` |
+| `volk` | Dynamic loader, meta-loader for entry points | Vendored, one `.c` plus header |
+| VMA | Device memory suballocation | Vendored, header-only |
+| `vulkan-1.dll` | Runtime | Already present in `System32` |
+
+Vendored dependencies MUST live in `third_party/` and be checked in, so the build needs no
+network.
+
+### 13.3 Shaders
+
+- GLSL under `shaders/`, compiled to SPIR-V by `glslc` as a Makefile rule.
+- Compiled SPIR-V MUST be embedded in the executable. Loading `.spv` from disk violates 6.1.
+- Shader compilation MUST fail the build.
+
+### 13.4 Size and structure
+
+- The finished `.scr` SHOULD stay under 8 MB.
+- The Makefile MUST keep its current shape — `all`, `clean`, `install`, temp files in
+  `build/tmp`, `-municode -DUNICODE -D_UNICODE`, `-mwindows`, `-static`. It grows a shader rule, a
+  multi-TU object rule and the new libraries. It does not become CMake.
+
+## 14. Acceptance tests
+
+| # | Test | Pass condition |
+|---:|---|---|
+| A1 | `make` from a clean tree | Builds `nuke-saver.scr`, zero warnings under `-Wall -Wextra` |
+| A2 | Run with no arguments | Full-screen on every monitor, cursor hidden |
+| A3 | Press a key at any point | Exits within 250 ms, exit code 0 |
+| A4 | Move the mouse | Same, and not triggered by the spurious first move |
+| A5 | Two consecutive cycles | Different city, different camera shot |
+| A6 | Same seed forced twice | Identical city, missile approach and gross cloud shape |
+| A7 | Preview in Screen Saver Settings | Animates, creates no Vulkan device, survives dialog close |
+| A8 | `/c` | Dialog opens, all three settings persist across a restart |
+| A9 | Rename `vulkan-1.dll` and run | Black screen saver, exits on input, no error dialog |
+| A10 | Reference machine, medium, 3440×1440 | 60 FPS sustained through phases 6–9 |
+| A11 | 30-minute soak | No growth in working set or VRAM, no crash |
+| A12 | Unplug a monitor mid-run | Survives; remaining monitors keep rendering |
+| A13 | Count buildings at end of phase 1 | Exactly 500, all standing, none visible before its start time, board up last |
+| A14 | Time the countdown against a stopwatch | 5.00 s ±50 ms, digits step once per second, no drift |
+| A15 | Frame-step phase 6 | No building is fragmented before the shell reaches it |
+| A16 | Frame at end of phase 7 | Majority of fragments at rest on the ground, outside the city footprint |
+| A17 | Frame at mid-phase 8 | Recognisable mushroom, cap rolling, fragments still carrying building colours |
+| A18 | Sample 50 building colours | Spread consistent with ±10% HSV variation; no two adjacent buildings identical |
+| A19 | Run each `TimeOfDay` setting | Sun angle, sun colour, sky and exposure all differ; windows brightest at night |
+| A20 | Board legibility, every shot type, 16:9 and 21:9 | All eight glyphs readable through phases 3–4 from every point on the orbit arc; no building occludes a readable face |
+| A21 | Board light at night | Rooftops beneath the board visibly lit amber; board is the dominant city light |
+| A22 | Board yaw across a cycle | Fixed after phase 1; no per-frame rotation toward the camera; all four faces agree every frame |
+| A23 | Frame-step phase 9 | Stem empties before the cap; release is staggered, never all at once |
+| A24 | Frame at end of phase 9 | Cloud gone, majority of fragments at rest, debris field over the scorched footprint |
+| A25 | Sample camera position every second of a full cycle | Always moving; no frame-to-frame repeat; total arc 30–90°; direction varies between cycles |
+
+## 15. Out of scope
+
+Audio. HDR display output — the pipeline is HDR internally, the swapchain is SDR. Networked sync.
+Configuration beyond section 10. Physically accurate anything. Real-world geography or any
+identifiable real city. Ray tracing extensions. Non-Windows platforms. Any 32-bit build.
+Rigid-body collision between fragments — they collide with the ground and nothing else.
+
+## 16. Open questions
+
+- Q1: Default time of day when `TimeOfDay` is not random. Twilight gives the fireball the best
+  contrast; night gives the flash the most violence and shows the countdown board at its best.
+- Q3: Preview stills get baked from a real run, making them an M6 task. Confirm that preview
+  showing black until then is acceptable.
+- Q5: Is a fixed 8 km basin enough at the widest camera, or does the horizon need a cheap
+  far-field impostor?
+- Q6: Should the countdown board carry anything besides the time — a name, a marking — or stay
+  purely a readout?
+
+Q2 (countdown placement) and Q4 (cloud dispersal) were resolved in revision 3. Numbering is kept
+so earlier discussion still refers to the right thing.

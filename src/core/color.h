@@ -51,6 +51,15 @@ Vec3 Albedo(const ColorRange& range, uint64_t seed, uint64_t id, uint64_t channe
 // the parent "darkened 15-30%" - which have to be expressed in HSV to mean anything.
 Hsv AlbedoHsv(const ColorRange& range, uint64_t seed, uint64_t id, uint64_t channelBase = 0);
 
+// The same draw with the six unit values supplied by the caller, in the order hue, saturation,
+// value, then the three offsets. For surfaces whose variation should follow the world rather than
+// the mesh: a per-vertex hash makes the *mesh* the thing being coloured, and on a radial grid seen
+// at a grazing angle that paints the grid — the desert came out as a fine speckle converging on
+// the camera, which is the topology, not the ground. Feeding these from a smooth spatial field
+// gives the variation a scale in metres instead.
+Vec3 AlbedoFrom(const ColorRange& range, const float draw[6]);
+Hsv  AlbedoHsvFrom(const ColorRange& range, const float draw[6]);
+
 // Spec 5.3 derivations, kept here so the numbers live next to the palette they modify.
 Hsv Desaturate(const Hsv& c, float amount);
 Hsv Darken(const Hsv& c, float amount);

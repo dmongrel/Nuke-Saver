@@ -21,6 +21,7 @@
 #include "render/vk/window_target.h"
 #include "world/world.h"
 
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
@@ -68,6 +69,11 @@ struct PipelineDesc {
     VkPipelineLayout layout     = VK_NULL_HANDLE;
     bool             depthTest  = false;
     bool             depthWrite = false;
+    // Fullscreen passes build their own vertices from gl_VertexIndex; world geometry comes from a
+    // buffer. That is the only vertex layout in the project, so it is a flag rather than a
+    // description nobody would ever vary.
+    bool             worldVertices = false;
+    bool             backfaceCull  = false;
 };
 
 VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
@@ -89,8 +95,27 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
     stages[1].module = frag;
     stages[1].pName  = "main";
 
+    // Matches world::Vertex in src/world/mesh.h.
+    VkVertexInputBindingDescription binding{};
+    binding.binding   = 0;
+    binding.stride    = sizeof(world::Vertex);
+    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    const VkVertexInputAttributeDescription attributes[] = {
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(world::Vertex, position)},
+        {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(world::Vertex, normal)},
+        {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(world::Vertex, albedo)},
+        {3, 0, VK_FORMAT_R32_SFLOAT, offsetof(world::Vertex, rockiness)},
+    };
+
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    if (desc.worldVertices) {
+        vertexInput.vertexBindingDescriptionCount   = 1;
+        vertexInput.pVertexBindingDescriptions      = &binding;
+        vertexInput.vertexAttributeDescriptionCount = 4;
+        vertexInput.pVertexAttributeDescriptions    = attributes;
+    }
 
     VkPipelineInputAssemblyStateCreateInfo assembly{};
     assembly.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -104,7 +129,7 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
     VkPipelineRasterizationStateCreateInfo raster{};
     raster.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     raster.polygonMode = VK_POLYGON_MODE_FILL;
-    raster.cullMode    = VK_CULL_MODE_NONE;
+    raster.cullMode    = desc.backfaceCull ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
     raster.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     raster.lineWidth   = 1.0f;
 
@@ -180,6 +205,12 @@ public:
         windows_.clear();
 
         VkDevice dev = ctx_->device();
+        vk::DestroyBuffer(*ctx_, &terrainVertices_);
+        vk::DestroyBuffer(*ctx_, &terrainIndices_);
+        vk::DestroyBuffer(*ctx_, &horizonVertices_);
+        vk::DestroyBuffer(*ctx_, &horizonIndices_);
+
+        if (groundPipeline_) vkDestroyPipeline(dev, groundPipeline_, nullptr);
         if (skyPipeline_) vkDestroyPipeline(dev, skyPipeline_, nullptr);
         if (scenePipelineLayout_) vkDestroyPipelineLayout(dev, scenePipelineLayout_, nullptr);
         if (sceneSetLayout_) vkDestroyDescriptorSetLayout(dev, sceneSetLayout_, nullptr);
@@ -207,10 +238,19 @@ public:
             dev, {"sky.vert", "sky.frag", passes_.hdr, scenePipelineLayout_, false, false});
         if (!skyPipeline_) return false;
 
+        // Terrain and the horizon range: depth tested and written, and back-face culled, which
+        // halves the triangles rasterised for the mountains.
+        groundPipeline_ = CreateGraphicsPipeline(
+            dev, {"ground.vert", "ground.frag", passes_.hdr, scenePipelineLayout_, true, true, true,
+                  true});
+        if (!groundPipeline_) return false;
+
         tonemapPipeline_ = CreateGraphicsPipeline(
             dev, {"fullscreen.vert", "tonemap.frag", passes_.present, tonemapPipelineLayout_, false,
-                  false});
-        return tonemapPipeline_ != VK_NULL_HANDLE;
+                  false, false, false});
+        if (!tonemapPipeline_) return false;
+
+        return UploadStaticGeometry();
     }
 
     bool AttachWindow(HWND hwnd, int width, int height) override {
@@ -498,7 +538,15 @@ private:
         vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyPipeline_);
         vkCmdDraw(frame.cmd, 3, 1, 0, 0);
 
-        // M3b draws terrain, the horizon range and the city here, over the sky and with depth.
+        vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, groundPipeline_);
+
+        // The range is drawn before the terrain rather than after. Both write depth, so the order
+        // does not change the image, but the mountains cover most of the upper band and filling
+        // that depth first rejects a good share of the terrain's distant fragments.
+        DrawMesh(frame.cmd, horizonVertices_, horizonIndices_, horizonIndexCount_);
+        DrawMesh(frame.cmd, terrainVertices_, terrainIndices_, terrainIndexCount_);
+
+        // M3b draws the city and the countdown board here.
 
         vkCmdEndRenderPass(frame.cmd);
     }
@@ -526,6 +574,46 @@ private:
 
         vkCmdDraw(frame.cmd, 3, 1, 0, 0);
         vkCmdEndRenderPass(frame.cmd);
+    }
+
+    bool UploadMesh(const world::Mesh& mesh, Buffer* vertices, Buffer* indices,
+                    uint32_t* indexCount) {
+        *indexCount = 0;
+        if (mesh.empty()) return true;  // an empty mesh is legitimate, not a failure
+
+        if (!vk::CreateBufferWithData(*ctx_, mesh.vertices.data(), mesh.vertexBytes(),
+                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices) ||
+            !vk::CreateBufferWithData(*ctx_, mesh.indices.data(), mesh.indexBytes(),
+                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices)) {
+            return false;
+        }
+
+        *indexCount = static_cast<uint32_t>(mesh.indices.size());
+        return true;
+    }
+
+    bool UploadStaticGeometry() {
+        if (!UploadMesh(world_.terrainMesh, &terrainVertices_, &terrainIndices_,
+                        &terrainIndexCount_) ||
+            !UploadMesh(world_.horizonMesh, &horizonVertices_, &horizonIndices_,
+                        &horizonIndexCount_)) {
+            app::Log("vulkan: static geometry upload failed");
+            return false;
+        }
+
+        app::Log("vulkan: uploaded %u terrain indices, %u horizon indices", terrainIndexCount_,
+                 horizonIndexCount_);
+        return true;
+    }
+
+    void DrawMesh(VkCommandBuffer cmd, const Buffer& vertices, const Buffer& indices,
+                  uint32_t indexCount) {
+        if (!indexCount) return;
+
+        const VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vertices.handle, &offset);
+        vkCmdBindIndexBuffer(cmd, indices.handle, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
     }
 
     // Copies the image that was just presented into a host-visible buffer. Recorded into the
@@ -611,6 +699,12 @@ private:
     VkDescriptorSetLayout sceneSetLayout_      = VK_NULL_HANDLE;
     VkPipelineLayout      scenePipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline            skyPipeline_         = VK_NULL_HANDLE;
+    VkPipeline            groundPipeline_      = VK_NULL_HANDLE;
+
+    Buffer   terrainVertices_{}, terrainIndices_{};
+    Buffer   horizonVertices_{}, horizonIndices_{};
+    uint32_t terrainIndexCount_ = 0;
+    uint32_t horizonIndexCount_ = 0;
 
     VkSampler             sampler_               = VK_NULL_HANDLE;
     VkDescriptorSetLayout tonemapSetLayout_      = VK_NULL_HANDLE;

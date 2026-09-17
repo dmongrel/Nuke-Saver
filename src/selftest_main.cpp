@@ -171,6 +171,8 @@ void TestNoise();
 void TestColor();
 void TestSky();
 void TestCamera();
+void TestTerrain();
+void TestHorizon();
 }  // namespace selftest
 
 int main() {
@@ -183,6 +185,8 @@ int main() {
     selftest::TestColor();
     selftest::TestSky();
     selftest::TestCamera();
+    selftest::TestTerrain();
+    selftest::TestHorizon();
     TestArgs();
     TestInputWatcher();
     TestSettings();

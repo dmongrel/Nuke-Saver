@@ -332,7 +332,15 @@ bool WindowTarget::Rebuild(Context& ctx, const RenderPasses& passes, uint32_t wi
     sci.imageColorSpace  = surfaceFormat.colorSpace;
     sci.imageExtent      = extent;
     sci.imageArrayLayers = 1;
-    sci.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // TRANSFER_SRC is what lets the capture path read a presented frame back. It is asked for
+    // only when the surface advertises it, because a surface is not obliged to allow it and
+    // demanding it unconditionally would fail swapchain creation on hardware that does not -
+    // trading a diagnostic for the whole screen saver.
+    sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) {
+        sci.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
+    captureable_ = (sci.imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
     sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     sci.preTransform     = caps.currentTransform;
     sci.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;

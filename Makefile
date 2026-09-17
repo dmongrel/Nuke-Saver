@@ -36,9 +36,15 @@ export TMPDIR := $(TMP)
 # vulkan-1.dll, so every entry point comes from volk at runtime.
 CPPFLAGS = -Isrc -Ithird_party/volk -Ithird_party/vma -DVK_NO_PROTOTYPES -DVK_USE_PLATFORM_WIN32_KHR \
            -DUNICODE -D_UNICODE
+# -MMD -MP makes the compiler emit a .d file listing every header a translation unit read, which
+# is then included below. Without it nothing rebuilds when a header changes, and the result is not
+# a build error but a silent ODR violation: two objects compiled against different layouts of the
+# same struct, linked together, corrupting memory at runtime. That cost an access violation that
+# looked seed-dependent and vanished whenever the affected file was touched for any other reason.
+DEPFLAGS = -MMD -MP
 WARN     = -Wall -Wextra
-CXXFLAGS = -std=c++17 $(WARN) -O2 -municode
-CFLAGS   = -std=c11 $(WARN) -O2
+CXXFLAGS = -std=c++17 $(WARN) $(DEPFLAGS) -O2 -municode
+CFLAGS   = -std=c11 $(WARN) $(DEPFLAGS) -O2
 
 LDFLAGS  = -mwindows -municode -static
 LDLIBS   = -lgdi32 -lshell32 -ladvapi32
@@ -67,6 +73,9 @@ APP_OBJS     := $(APP_CXX_SRCS:%.cpp=$(OBJDIR)/%.o) \
 SELFTEST_OBJS := $(filter-out $(OBJDIR)/src/main.o,$(APP_OBJS))                  $(SELFTEST_SRCS:%.cpp=$(OBJDIR)/%.o)
 
 SELFTEST_EXE := $(BUILD)/nuke-saver-selftest.exe
+
+# One .d beside every .o, covering both targets' objects.
+DEPS := $(APP_OBJS:.o=.d) $(SELFTEST_SRCS:%.cpp=$(OBJDIR)/%.d)
 
 .PHONY: all clean install selftest
 .SUFFIXES:
@@ -126,6 +135,10 @@ $(BUILD) $(SPVDIR) $(GENDIR) $(BUILDTMP):
 
 clean:
 	rm -rf $(TARGET) $(RES) $(BUILD)
+
+# Last, so a missing .d on the first build is not an error - the object does not exist yet either,
+# and it will be built with its dependencies recorded.
+-include $(DEPS)
 
 install: $(TARGET)
 	cp $(TARGET) "$(SYSTEMROOT)/System32/"

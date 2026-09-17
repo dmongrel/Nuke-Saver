@@ -74,9 +74,15 @@ public:
 
     // The swapchain image behind an acquired frame. Only the capture path wants this: reading
     // back what was actually presented is the one check that cannot be faked by re-rendering.
+    // Null unless captureable(), so a caller that forgets to check cannot silently copy from an
+    // image the surface never agreed to allow transfers from.
     VkImage swapchainImage(uint32_t index) const {
-        return index < images_.size() ? images_[index] : VK_NULL_HANDLE;
+        if (!captureable_ || index >= images_.size()) return VK_NULL_HANDLE;
+        return images_[index];
     }
+
+    // Whether the surface allowed TRANSFER_SRC on its images. Capture is impossible without it.
+    bool captureable() const { return captureable_; }
 
 private:
     WindowTarget() = default;
@@ -91,6 +97,7 @@ private:
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     VkExtent2D     extent_{0, 0};
     bool           needsRebuild_ = false;
+    bool           captureable_  = false;
 
     std::vector<VkImage>     images_;
     std::vector<VkImageView> imageViews_;

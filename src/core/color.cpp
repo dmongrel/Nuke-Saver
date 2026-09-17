@@ -58,15 +58,13 @@ Vec3 SrgbToLinear(const Vec3& c) {
     return {SrgbToLinear(c.x), SrgbToLinear(c.y), SrgbToLinear(c.z)};
 }
 
-Hsv AlbedoHsv(const ColorRange& r, uint64_t seed, uint64_t id, uint64_t channelBase) {
-    const uint64_t ch = channelBase * 8ull;
-
+Hsv AlbedoHsvFrom(const ColorRange& r, const float draw[6]) {
     // Base draw within the range, then the offset. Six independent channels, because spec 5.2
     // asks for hue, saturation and value "each drawn independently" - and the base draw must be
     // independent of the offset too, or the two correlate and the spread collapses.
-    float h = Lerp(r.hueMin, r.hueMax, HashFloat(seed, id, ch + 0));
-    float s = Lerp(r.satMin, r.satMax, HashFloat(seed, id, ch + 1));
-    float v = Lerp(r.valMin, r.valMax, HashFloat(seed, id, ch + 2));
+    float h = Lerp(r.hueMin, r.hueMax, draw[0]);
+    float s = Lerp(r.satMin, r.satMax, draw[1]);
+    float v = Lerp(r.valMin, r.valMax, draw[2]);
 
     // Hue varies by a fraction of the stated hue *range*, per spec 5.3: +/-10% of a hue value
     // would be meaningless (10% of 200 degrees is a different colour, 10% of 5 degrees is
@@ -74,13 +72,25 @@ Hsv AlbedoHsv(const ColorRange& r, uint64_t seed, uint64_t id, uint64_t channelB
     // A degenerate range - the frame colour has no hue span - falls back to a small absolute
     // span so a grey still carries a trace of variation rather than being flat.
     const float hueSpan = (r.hueMax - r.hueMin) > 1e-3f ? (r.hueMax - r.hueMin) : 12.0f;
-    h += hueSpan * r.variation * HashSigned(seed, id, ch + 3);
+    h += hueSpan * r.variation * (draw[3] * 2.0f - 1.0f);
 
     // Saturation and value vary proportionally, which is what "+/-10%" means for a scalar.
-    s *= 1.0f + r.variation * HashSigned(seed, id, ch + 4);
-    v *= 1.0f + r.variation * HashSigned(seed, id, ch + 5);
+    s *= 1.0f + r.variation * (draw[4] * 2.0f - 1.0f);
+    v *= 1.0f + r.variation * (draw[5] * 2.0f - 1.0f);
 
     return {h, Saturate(s), Saturate(v)};
+}
+
+Vec3 AlbedoFrom(const ColorRange& r, const float draw[6]) {
+    return SrgbToLinear(HsvToRgb(AlbedoHsvFrom(r, draw)));
+}
+
+Hsv AlbedoHsv(const ColorRange& r, uint64_t seed, uint64_t id, uint64_t channelBase) {
+    const uint64_t ch      = channelBase * 8ull;
+    const float    draw[6] = {HashFloat(seed, id, ch + 0), HashFloat(seed, id, ch + 1),
+                              HashFloat(seed, id, ch + 2), HashFloat(seed, id, ch + 3),
+                              HashFloat(seed, id, ch + 4), HashFloat(seed, id, ch + 5)};
+    return AlbedoHsvFrom(r, draw);
 }
 
 Vec3 Albedo(const ColorRange& r, uint64_t seed, uint64_t id, uint64_t channelBase) {

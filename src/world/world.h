@@ -11,7 +11,10 @@
 #define NUKE_SAVER_WORLD_WORLD_H
 
 #include "world/camera.h"
+#include "world/horizon.h"
+#include "world/mesh.h"
 #include "world/sky.h"
+#include "world/terrain.h"
 
 #include <cstdint>
 
@@ -38,6 +41,14 @@ struct World {
     float cityRadius = 800.0f;
 
     float cycleSeconds = kNominalCycleSeconds;
+
+    TerrainParams terrain;
+    HorizonParams horizon;
+
+    // Static geometry, generated once. Held on the CPU only until the renderer uploads it; the
+    // world is the source of truth for shape, the GPU buffers are a copy.
+    Mesh terrainMesh;
+    Mesh horizonMesh;
 
     CameraState CameraAt(float t) const { return camera.Evaluate(t); }
 };

@@ -1,6 +1,6 @@
 # nuke-saver: Build Specification
 
-Status: draft, fourth revision — more specs to follow
+Status: draft, fifth revision — more specs to follow
 Target: Windows 10 1903+ / Windows 11, x86-64
 Deliverable: `nuke-saver.scr`, a native Win32 screen saver rendering with Vulkan
 
@@ -39,6 +39,9 @@ Revisions:
   else, and is art-directed as **diegetic title typography**: numerals that belong to the city
   the way film credits are built into a shot (section 7.6). Weather is settled as **none** —
   no cloud layer, no precipitation (section 15).
+- 2026-09-17: owner direction, fifth pass. Q3 resolved: preview paints **black until M6**, when
+  the stills can be baked from a working renderer, and that is an accepted interim state rather
+  than an open defect (section 9.3). No open questions remain.
 
 ---
 
@@ -60,7 +63,8 @@ NOT present its output as predictive of anything. It is a light show.
 
 | Source | Describes | Status |
 |---|---|---|
-| Owner direction, 2026-09-17 (fourth pass) | Twilight default, mountain horizon impostor, skybox with stars and sun/moon key light, diegetic countdown typography, no weather | **Authoritative** |
+| Owner direction, 2026-09-17 (fifth pass) | Preview black until M6 | **Authoritative** |
+| Owner direction, 2026-09-17 (fourth pass) | Twilight default, mountain horizon impostor, skybox with stars and sun/moon key light, diegetic countdown typography, no weather | Authoritative where the fifth pass is silent |
 | Owner direction, 2026-09-17 (third pass) | World-space countdown board, dispersing mushroom cloud, orbiting camera | Authoritative where the fourth pass is silent |
 | Owner direction, 2026-09-17 (second pass) | Growth, countdown, missile, triangle destruction and triangle mushroom, colour rules, four times of day | Authoritative where the third pass is silent |
 | Owner direction, 2026-09-17 (first pass) | Screen saver, desert city, nuclear detonation, C++, Vulkan, real-time, non-physical | Authoritative where later passes are silent |
@@ -576,6 +580,12 @@ Standing up a Vulkan device for that is not worth the risk or the wait.
   resources — frames captured from a real run, one per major phase.
 - It MUST survive its parent window vanishing.
 
+**Interim state.** The stills cannot exist until there is a renderer to capture them from, which
+makes baking them an M6 task. Until then, preview MUST paint black and MUST still meet every
+other requirement above — no Vulkan, no crash when the parent goes away, correct exit. A black
+preview is an accepted interim state, not an open defect, and A7 is scored against the behavior
+rather than the picture until M6.
+
 ## 10. Settings
 
 Stored under `HKCU\Software\nuke-saver`. Every value has a working default; a fresh install MUST
@@ -692,7 +702,7 @@ network.
 | A4 | Move the mouse | Same, and not triggered by the spurious first move |
 | A5 | Two consecutive cycles | Different city, different camera shot |
 | A6 | Same seed forced twice | Identical city, missile approach and gross cloud shape |
-| A7 | Preview in Screen Saver Settings | Animates, creates no Vulkan device, survives dialog close |
+| A7 | Preview in Screen Saver Settings | Creates no Vulkan device, survives dialog close; black before M6, cross-fading stills after |
 | A8 | `/c` | Dialog opens, all three settings persist across a restart |
 | A9 | Rename `vulkan-1.dll` and run | Black screen saver, exits on input, no error dialog |
 | A10 | Reference machine, medium, 3440×1440 | 60 FPS sustained through phases 6–9 |
@@ -732,9 +742,16 @@ simulation, and a clear sky suits a desert.
 
 ## 16. Open questions
 
-- Q3: Preview stills get baked from a real run, making them an M6 task. Confirm that preview
-  showing black until then is acceptable.
+None. Every question raised across revisions 1–4 is resolved:
 
-Resolved: Q2 (countdown placement) and Q4 (cloud dispersal) in revision 3; Q1 (default time of
-day — twilight), Q5 (horizon impostor — mountain range, 6.3) and Q6 (board content — time only,
-7.6) in revision 4. Numbering is kept so earlier discussion still refers to the right thing.
+| | Question | Resolution | Revision |
+|---|---|---|---|
+| Q1 | Default time of day | Twilight (section 10) | 4 |
+| Q2 | Countdown placement | World object, not an overlay (7.6) | 3 |
+| Q3 | Preview before stills exist | Black until M6, accepted (9.3) | 5 |
+| Q4 | Does the cloud hold or disperse | Disperses, own phase (7.7) | 3 |
+| Q5 | Horizon at the widest camera | Far-field impostor, triangular range (6.3) | 4 |
+| Q6 | Board content | The time and nothing else (7.6) | 4 |
+
+Numbering is kept so earlier discussion still refers to the right thing. New questions append
+from Q7.

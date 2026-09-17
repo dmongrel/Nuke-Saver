@@ -1,6 +1,6 @@
 # nuke-saver: Implementation Plan
 
-Status: draft, third revision
+Status: draft, fourth revision
 Companion to [`Nuke-Saver-Spec.md`](Nuke-Saver-Spec.md), which owns behavior. This document
 owns sequencing, module layout and risk.
 
@@ -18,6 +18,8 @@ Revisions:
 - 2026-09-17: updated against spec revision 4. M3 absorbs the horizon range and the skybox, and
   the countdown board becomes skyline-scale typography rather than signage. M3 is now the biggest
   milestone in the plan and carries a suggested split.
+- 2026-09-17: updated against spec revision 5. Preview is finished at M1 rather than revisited
+  later: black is the specified behavior until M6 bakes the stills, so A7 moves to M1.
 
 ---
 
@@ -80,8 +82,11 @@ The Win32 side, finished, before any rendering exists.
 - GDI fallback renderer behind the same interface the Vulkan renderer will implement.
 - Renderer selection: try Vulkan, fall back on any failure, never show a dialog.
 - Settings under `HKCU\Software\nuke-saver`, and the `/c` dialog.
+- Preview (`/p`): no Vulkan, survives its parent vanishing, paints black. Black is the specified
+  behavior until M6 bakes the stills (spec 9.3), so preview is **finished** at this milestone
+  except for the pictures — it does not need revisiting in between.
 
-Exit: A2, A3, A4, A8, A9, A12 pass. The saver is complete except that it draws nothing.
+Exit: A2, A3, A4, A7, A8, A9, A12 pass. The saver is complete except that it draws nothing.
 
 ### M2 — Vulkan core
 
@@ -173,7 +178,8 @@ Exit: a full cycle runs end to end and loops cleanly. A14 passes.
 - The five particle systems (spec 8.3).
 - Embers, settled dust, smoke.
 - Quality scaler and the auto-quality controller (spec 11.2).
-- Bake preview stills from a real run; wire the preview cross-fade.
+- Bake preview stills from a real run and wire the cross-fade, replacing M1's black. This is the
+  only part of preview still outstanding; the behavior was signed off at M1.
 - Rewrite `README.md`.
 - Full acceptance pass, A1–A19. Size check against 8 MB.
 

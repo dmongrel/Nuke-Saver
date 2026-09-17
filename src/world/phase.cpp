@@ -46,7 +46,12 @@ Timeline Timeline::Create(uint64_t seed) {
     duration[static_cast<int>(Phase::Growth)]    = rng.Range(5.0f, 10.0f);
     duration[static_cast<int>(Phase::Settle)]    = rng.Range(2.0f, 3.0f);
     duration[static_cast<int>(Phase::Countdown)] = 5.0f;
-    duration[static_cast<int>(Phase::Missile)]   = rng.Range(2.5f, 4.0f);
+    // Longer than the 2.5-4 s this used to be. Spec 7.1 now has the missile entering over the
+    // mountains, kilometres further out than the old approach began, and at the old duration the
+    // final stretch of the run -- the part the phase exists to show -- went past in well under a
+    // second. It also moves the cycle length toward the 80-115 s spec 4.1 asks for rather than
+    // away from it.
+    duration[static_cast<int>(Phase::Missile)]   = rng.Range(4.0f, 6.0f);
     duration[static_cast<int>(Phase::Flash)]     = 0.3f;
     duration[static_cast<int>(Phase::Blast)]     = rng.Range(4.0f, 6.0f);
     duration[static_cast<int>(Phase::Scatter)]   = 5.0f;
@@ -54,7 +59,7 @@ Timeline Timeline::Create(uint64_t seed) {
     duration[static_cast<int>(Phase::Disperse)]  = rng.Range(15.0f, 25.0f);
     duration[static_cast<int>(Phase::Fade)]      = 8.0f;
 
-    // The cycle length the durations above actually produce runs about 74 to 104 seconds, which
+    // The cycle length the durations above actually produce runs about 76 to 106 seconds, which
     // does not reach the 80 to 115 spec 4.1 states — the overlap between phases 6 and 7 removes
     // four to six seconds that a straight sum of the table would include. Rather than quietly
     // shipping a short cycle or quietly editing the table, the two long phases are stretched to

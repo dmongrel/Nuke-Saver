@@ -191,7 +191,9 @@ Mesh BuildMissileMesh(uint64_t seed, float length, float radius) {
                radius * kFinSpan, radius * 0.22f, fin);
     }
 
-    AddPlume(&mesh, tailZ, nozzleR, length * 1.15f);
+    // Short. A plume longer than the missile made the whole object read as a streak of light with
+    // a speck at the front, which is the opposite of spec 7.1's deliberate machine.
+    AddPlume(&mesh, tailZ, nozzleR, length * 0.45f);
 
     return mesh;
 }

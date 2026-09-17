@@ -6,12 +6,15 @@
 // isolation — what it does not do is white out the frame, and by the time that is noticed the
 // cause could be anywhere in the exposure chain.
 
+#include "app/settings.h"
 #include "core/math.h"
 #include "selftest_check.h"
 #include "world/camera.h"
 #include "world/detonation.h"
+#include "world/horizon.h"
 #include "world/missile.h"
 #include "world/phase.h"
+#include "world/world.h"
 
 #include <cmath>
 #include <cstdio>
@@ -32,12 +35,13 @@ float Magnitude(const core::Vec3& c) {
 void TestMissile() {
     std::printf("missile (spec 7.1)\n");
 
-    bool arrives      = true;
-    bool starts       = true;
-    bool constantPace = true;
-    bool shallow      = true;
-    bool goneAfter    = true;
-    bool onlyPhase4   = true;
+    bool arrives     = true;
+    bool starts      = true;
+    bool slowsIn     = true;
+    bool neverStalls = true;
+    bool descends    = true;
+    bool goneAfter   = true;
+    bool onlyPhase4  = true;
 
     for (uint64_t s = 1; s <= 200; ++s) {
         const uint64_t   seed = s * 6364136223846793005ull + 1442695040888963407ull;
@@ -51,22 +55,27 @@ void TestMissile() {
             starts = false;
         }
 
-        // "Speed MUST be constant enough to read as deliberate rather than falling." Constant, in
-        // fact: the sampled step is the same length everywhere along the run.
-        const float span = tl.Duration(Phase::Missile);
-        float       first = -1.0f;
+        // Spec 7.1: the missile sheds speed on the way in, monotonically, and never stops. The
+        // deceleration is what keeps the final stretch readable now that the run starts kilometres
+        // out; a missile that came to a halt on the way would be a worse defect than one that
+        // arrived too fast, so both halves are checked.
+        const float span  = tl.Duration(Phase::Missile);
+        float       prior = -1.0f;
         for (int i = 0; i < 32; ++i) {
             const float t0 = tl.Start(Phase::Missile) + span * (static_cast<float>(i) / 32.0f);
             const float t1 = tl.Start(Phase::Missile) + span * (static_cast<float>(i + 1) / 32.0f);
             const float step = core::Length(det.MissileAt(tl, t1) - det.MissileAt(tl, t0));
-            if (first < 0.0f) first = step;
-            if (std::fabs(step - first) > first * 0.01f) constantPace = false;
+
+            if (prior >= 0.0f && step > prior + 1e-3f) slowsIn = false;
+            if (step <= core::Length(det.missileStart - det.center) * 0.008f) neverStalls = false;
+            prior = step;
         }
 
-        // A shallow descent, not a drop: the run covers far more ground than height.
+        // A descent, not a drop and not a slide: it covers more ground than height, and enough
+        // height to be coming down out of the sky rather than in across the rooftops.
         const core::Vec3 run  = det.center - det.missileStart;
         const float      flat = std::sqrt(run.x * run.x + run.z * run.z);
-        if (-run.y >= flat * 0.5f || -run.y <= 0.0f) shallow = false;
+        if (-run.y >= flat * 1.05f || -run.y <= flat * 0.50f) descends = false;
 
         // Spec 7.1: destroyed at impact, and MUST NOT be visible in phase 5 or later.
         if (det.MissileVisible(tl, tl.Start(Phase::Flash))) goneAfter = false;
@@ -78,8 +87,9 @@ void TestMissile() {
 
     Check(starts, "the missile begins its run off at its entry point");
     Check(arrives, "the missile reaches the city centre exactly at the end of phase 4");
-    Check(constantPace, "the missile flies at a constant speed (spec 7.1)");
-    Check(shallow, "the approach descends shallowly rather than falling");
+    Check(slowsIn, "the missile sheds speed all the way in and never gains it back");
+    Check(neverStalls, "and never stalls short of the impact point");
+    Check(descends, "the approach comes down out of the sky without falling vertically");
     Check(goneAfter, "the missile is not visible in phase 5 or later (spec 7.1)");
     Check(onlyPhase4, "the missile is visible during phase 4 and not before it");
 
@@ -188,6 +198,93 @@ void TestMissile() {
         }
     }
     Check(orthonormal, "the missile transform is orthonormal, so it rotates normals correctly");
+
+    // Spec 7.1: the missile MUST enter above the mountains. AimOverRidge is the mechanism, so it
+    // is asked the question directly, at every shot height the library reaches and on both sides
+    // of the city -- an entry on the camera's own side clears a ridge trivially, and one on the
+    // far side has to climb past the whole basin to do it.
+    bool clears   = true;
+    bool keptAim  = true;
+    bool respects = true;
+    bool shortest = true;
+
+    for (uint64_t s = 1; s <= 120; ++s) {
+        const uint64_t   seed   = s * 0x9E3779B97F4A7C15ull + 7ull;
+        const float      radius = 600.0f + static_cast<float>(s % 400);
+        Detonation       det    = Detonation::Create(seed, radius, 180.0f);
+
+        const float bearing  = det.missileBearing;
+        const float descent  = det.missileDescent;
+        const float start    = det.missileRun;
+        const float ridge    = core::Radians(4.0f + static_cast<float>(s % 7));
+        const float margin   = core::Radians(2.0f);
+
+        // Eight camera positions round the orbit, at four heights spanning the shot library.
+        const float around = core::kTwoPi * static_cast<float>(s % 8) / 8.0f;
+        const float height = radius * (0.02f + 0.83f * static_cast<float>(s % 4));
+        const core::Vec3 eye{std::cos(around) * radius * 2.4f, height,
+                             std::sin(around) * radius * 2.4f};
+
+        det.AimOverRidge(eye, ridge, margin, 7000.0f);
+
+        // Either it cleared the ridge, or no run inside the cap could have. The second half
+        // matters more than the first: "it gave up" is the answer a broken search gives too, so
+        // giving up is only acceptable when the longest run available also falls short.
+        const float want = ridge + margin;
+        const float got  = det.MissileEntryElevation(eye);
+        if (got < want) {
+            Detonation capped = det;
+            capped.SetMissileRun(7000.0f);
+            if (capped.MissileEntryElevation(eye) >= want) clears = false;
+        }
+        if (det.missileRun > 7000.0f + 1.0f) respects = false;
+
+        // And no longer than it had to be. A run that clears the ridge by a mile is a missile
+        // that is a speck crossing the sky at four times the speed it needs, so the search has to
+        // stop at the first run that works rather than at a comfortable one: one step shorter
+        // must fail.
+        if (det.missileRun > start + 1.0f) {
+            Detonation shorter = det;
+            shorter.SetMissileRun(det.missileRun - (7000.0f - start) / 48.0f - 1.0f);
+            if (shorter.MissileEntryElevation(eye) >= want) shortest = false;
+        }
+
+        // Aiming moves the entry point out along the approach it was already on. If it changed the
+        // bearing or the angle, the framing solved before it would have been solved for a
+        // different missile.
+        if (std::fabs(det.missileBearing - bearing) > 1e-5f) keptAim = false;
+        if (std::fabs(det.missileDescent - descent) > 1e-5f) keptAim = false;
+
+        const core::Vec3 run = det.missileStart - det.center;
+        const float      flat = std::sqrt(run.x * run.x + run.z * run.z);
+        if (std::fabs(std::atan2(run.y, flat) - descent) > 1e-3f) keptAim = false;
+    }
+
+    Check(clears, "the missile is aimed in over the mountains, or as far over them as it can get");
+    Check(respects, "and never past the cap that would put its entry point inside the range");
+    Check(shortest, "and no further out than clearing the ridge actually required");
+    Check(keptAim, "aiming lengthens the run without touching the bearing or the descent angle");
+
+    // And the same question of whole worlds, which is where the ordering can go wrong: the aim is
+    // taken against the camera and the range that this cycle actually built, and both of those are
+    // decided after the detonation is. Eight is enough to catch a mis-ordering; it is not a survey.
+    bool worldsClear = true;
+    for (uint64_t s = 1; s <= 8; ++s) {
+        app::Settings settings;
+        settings.camera = static_cast<app::CameraMode>(s % 4 == 0 ? 1 : (s % 4) + 1);
+
+        const world::World w = world::Generate(settings, s * 0xA24BAull + 991ull);
+
+        // The peaks this cycle shipped: GenerateClosedRange left its widened parameters in
+        // world.horizon, and the generator is seeded, so this is the same range.
+        const std::vector<Peak> peaks = GeneratePeaks(w.horizon);
+
+        const CameraState entry = w.camera.Evaluate(w.timeline.Start(Phase::Missile));
+        const float ridge = SilhouetteElevation(peaks, entry.eye, w.detonation.missileBearing);
+
+        if (w.detonation.MissileEntryElevation(entry.eye) <= ridge) worldsClear = false;
+    }
+    Check(worldsClear, "and in a built world the missile enters above the range behind it");
 }
 
 void TestFireAndFlash() {

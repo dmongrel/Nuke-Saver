@@ -594,12 +594,18 @@ public:
     }
 
     bool AttachWindow(HWND hwnd, int width, int height) override {
-        if (!ctx_ || ctx_->deviceLost()) return false;
+        if (!ctx_ || ctx_->deviceLost()) {
+            app::Log("vulkan: attach refused, no context or the device is lost");
+            return false;
+        }
 
         Attached a;
         a.target = WindowTarget::Create(*ctx_, passes_, hwnd, static_cast<uint32_t>(width),
                                         static_cast<uint32_t>(height));
-        if (!a.target) return false;
+        if (!a.target) {
+            app::Log("vulkan: attach failed, no swapchain for %dx%d", width, height);
+            return false;
+        }
 
         // One uniform buffer per frame in flight. Sharing a single buffer would mean writing the
         // copy the GPU is still reading, which shows up as a frame of the previous camera - or,
@@ -608,6 +614,7 @@ public:
             if (!vk::CreateBuffer(*ctx_, sizeof(SceneUniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                   vk::BufferUse::HostWritable, &a.sceneUbo[i]) ||
                 !AllocateSet(sceneSetLayout_, &a.sceneSet[i])) {
+                app::Log("vulkan: attach failed on scene uniform %u", i);
                 DestroyAttached(a);
                 return false;
             }
@@ -626,6 +633,7 @@ public:
         if (!vk::CreateBuffer(*ctx_, kExposureBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                               vk::BufferUse::HostWritable, &a.exposure) ||
             !AllocateSet(tonemapSetLayout_, &a.tonemapSet)) {
+            app::Log("vulkan: attach failed on the exposure buffer");
             DestroyAttached(a);
             return false;
         }
@@ -643,6 +651,7 @@ public:
                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                               vk::BufferUse::GpuOnly, &a.particleBins) ||
             !AllocateSet(particleSetLayout_, &a.particleSet)) {
+            app::Log("vulkan: attach failed on the particle sort buffers (%zu bytes)", sortBytes);
             DestroyAttached(a);
             return false;
         }
@@ -653,10 +662,12 @@ public:
         a.bloomUp.assign(levels, VK_NULL_HANDLE);
         for (uint32_t i = 0; i < levels; ++i) {
             if (!AllocateSet(bloomSetLayout_, &a.bloomDown[i])) {
+                app::Log("vulkan: attach failed on bloom level %u of %u (down)", i, levels);
                 DestroyAttached(a);
                 return false;
             }
             if (i > 0 && !AllocateSet(bloomSetLayout_, &a.bloomUp[i])) {
+                app::Log("vulkan: attach failed on bloom level %u of %u (up)", i, levels);
                 DestroyAttached(a);
                 return false;
             }
@@ -1304,7 +1315,13 @@ private:
 
             // Spec 5.1 puts the exhaust at 20 to 40 linear. Like the board and the windows, the
             // shader divides by the base exposure, so this is what the viewer sees.
-            push.exhaust[0] = 30.0f;
+            //
+            // At the bottom of that band rather than in the middle, and the shader dims it further
+            // with distance. The missile now enters kilometres out and kilometres up (spec 7.1),
+            // and a 30-linear emitter that small and that far away is a bloom bead with nothing
+            // legible inside it. The airframe carries the visibility instead, lit rather than
+            // emissive, which is what "bright, but not a glowing dot" asks for.
+            push.exhaust[0] = 20.0f;
 
             vkCmdPushConstants(frame.cmd, missilePipelineLayout_,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,

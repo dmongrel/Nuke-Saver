@@ -102,6 +102,23 @@ float HighestCameraPoint(const OrbitCamera& camera, float cycleSeconds) {
     return highest;
 }
 
+// Spec 7.1's framing constraint, as a distance from the impact point rather than a time: the
+// missile must be on screen for the last stretch of its approach.
+//
+// 0.85 city radii, which on a typical run is where the missile is about two seconds out — the
+// figure spec 7.1 states. Stated as a distance because the run length is not settled when the
+// solver runs, and taken at the low end because the approach is now steep: at 40 degrees the
+// missile is 700 m up while it is still 850 m out, and framing it from any further back made it
+// the binding constraint on the orbit instead of the cloud, pushing the camera 30% further out
+// and shrinking the city through the whole first half of the cycle for the sake of three seconds.
+constexpr float kMissileFramedWithin = 0.85f;
+
+// How far out AimOverRidge is allowed to push the entry point. The range starts at 14 km, and an
+// entry point walking out toward it would eventually be born inside a mountain; well short of that
+// the missile is a speck crossing half the sky in three seconds. At 7 km it is out past anything
+// else in the scene and still in front of the range by a factor of two.
+constexpr float kMissileMaxRun = 7000.0f;
+
 }  // namespace
 
 World Generate(const app::Settings& settings, uint64_t seed) {
@@ -167,15 +184,23 @@ World Generate(const app::Settings& settings, uint64_t seed) {
         debris.radius = world.cityRadius * 1.35f;
         debris.height = 40.0f;
 
-        // Spec 7.1 makes this a framing requirement rather than a hope: the missile MUST be on
-        // screen for the last two seconds of its run. Sized from where it actually is when those
-        // two seconds begin, so the constraint is the real one and not a guess at a bearing.
-        const float missileVisibleFrom = world.timeline.End(Phase::Missile) - 2.0f;
-        const core::Vec3 missileAt =
-            world.detonation.MissileAt(world.timeline, missileVisibleFrom);
+        // Spec 7.1 makes this a framing requirement rather than a hope: the arrival MUST be on
+        // screen. Sized from a distance along the path rather than from a clock time, because the
+        // run length is not settled yet — AimOverRidge stretches it below, once the range behind
+        // the camera exists. A distance is the honest statement of the requirement anyway: what
+        // has to be in frame is the last stretch of the approach, and how many seconds that takes
+        // is a property of the run, not of the shot.
+        const float missileFrom = world.cityRadius * kMissileFramedWithin;
+        const core::Vec3 missileAt = world.detonation.MissileWithin(missileFrom);
         Subject missile;
         missile.radius = std::sqrt(missileAt.x * missileAt.x + missileAt.z * missileAt.z);
         missile.height = missileAt.y;
+
+        // The window is still a pair of times, because the camera moves. It opens at the latest
+        // moment the missile can still be that far out, which is the whole phase: a wider window
+        // asks the solver to satisfy the constraint from more camera positions, so erring wide is
+        // erring safe.
+        const float missileVisibleFrom = world.timeline.Start(Phase::Missile);
 
         const FramingWindow windows[4] = {
             {city, world.timeline.Start(Phase::Growth), world.timeline.End(Phase::Settle)},
@@ -227,6 +252,30 @@ World Generate(const app::Settings& settings, uint64_t seed) {
     const std::vector<Peak> peaks = GenerateClosedRange(&world.horizon, &worst);
 
     world.horizonMesh = BuildHorizon(peaks, world.seed);
+
+    // Spec 7.1: the missile comes in over the mountains. That is a statement about the entry
+    // point's elevation as seen from the camera, measured against the range behind it — so it is
+    // the last thing settled, after both of those exist. Lengthening the run moves the entry out
+    // and up along a fixed bearing; it does not move the arrival, which is what the framing above
+    // was solved against.
+    {
+        const CameraState entry =
+            world.camera.Evaluate(world.timeline.Start(Phase::Missile));
+        const float ridge =
+            SilhouetteElevation(peaks, entry.eye, world.detonation.missileBearing);
+
+        // Two degrees of sky between the missile and the summits. Below about one the entry sits
+        // on the ridgeline and reads as having come *off* the mountains rather than over them.
+        world.detonation.AimOverRidge(entry.eye, ridge, core::Radians(2.0f), kMissileMaxRun);
+
+        app::Log("missile: bearing %.0f deg, descent %.0f deg, run %.0fm, entry %.0fm up at "
+                 "%.1f deg over a %.1f deg ridge",
+                 world.detonation.missileBearing / core::kDegToRad,
+                 world.detonation.missileDescent / core::kDegToRad, world.detonation.missileRun,
+                 world.detonation.missileStart.y,
+                 world.detonation.MissileEntryElevation(entry.eye) / core::kDegToRad,
+                 ridge / core::kDegToRad);
+    }
 
     app::Log("world: seed=%llu %s %s cityRadius=%.0fm revolution=%.0fs",
              static_cast<unsigned long long>(world.seed), TimeOfDayName(timeOfDay),

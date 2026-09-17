@@ -102,7 +102,7 @@ drawn per cycle, uniformly, from the stated range.
 | 1 | Growth | 5–10 s *random* | 500 buildings rise out of the ground, staggered, until the city stands complete. The countdown board rises with them, last. See 6.5. |
 | 2 | Settle | 2–3 s *random* | The finished city, still, the board dark. Nothing happens. This beat exists so the countdown lands on a stable frame. |
 | 3 | Countdown | exactly 5 s | The board lights: `00:00:05` counting to `00:00:00`, throwing its own light across the rooftops. See 7.6. |
-| 4 | Missile | 2.5–4 s *random* | A missile enters frame from off screen and runs down to the city centre, trailing exhaust. The board holds at `00:00:00`. |
+| 4 | Missile | 4–6 s *random* | A missile comes in over the mountains and runs down to the city centre, trailing a contrail. The board holds at `00:00:00`. |
 | 5 | Flash | 0.3 s | On impact the screen goes fully white over ~120 ms and holds. |
 | 6 | Blast | 4–6 s *random*, overlaps 7 | A refractive spherical shell expands fast from the impact point. Every building it touches — and the board — bursts into triangles. |
 | 7 | Scatter | 5 s exactly | Triangles fly outward from the centre, tumbling, gravity dragging them down until they are skidding and settling on the desert floor. |
@@ -322,12 +322,45 @@ Requirements:
 ### 7.1 Missile (phase 4)
 
 - One procedurally generated mesh: a cylinder body, a cone nose, four fins. No asset.
-- Enters from off screen at a random compass bearing and a shallow descent, reaching the city
-  centre exactly at the end of the phase. Speed MUST be constant enough to read as deliberate
-  rather than falling.
-- Carries an emissive exhaust plume (5.1) and a smoke trail persisting a few seconds behind it.
-- Camera framing MUST guarantee the missile is on screen for at least the last 2 s of its run.
-  A missile that arrives unseen wastes the phase.
+- Enters at a random compass bearing, reaching the city centre exactly at the end of the phase.
+
+**Where it comes from**
+
+- The entry point MUST be **above the mountain silhouette (6.3) as seen from the camera**, by a
+  clear margin, so the missile comes in over the range rather than appearing in front of it. This
+  is a statement about an angle, not about a distance: the same entry point is over the mountains
+  from a street-level shot and below them from a high oblique one. It therefore MUST be settled
+  after the camera and the range are, and it MUST be reached by lengthening the approach along the
+  bearing and descent angle already drawn, so that nothing solved earlier against the approach is
+  invalidated.
+- The approach MUST be long enough to be aimed that way and no longer. A run that overshoots the
+  requirement puts the missile so far out that it is a speck crossing half the sky, and a cap is
+  needed as well: an entry point walking outward without limit ends up inside the range itself.
+- Descent is steep enough to come down out of the sky — roughly 30° to 45° — rather than the
+  shallow slide that put the missile among the rooftops for the last second of its run.
+
+**How it flies**
+
+- Speed MUST read as deliberate rather than as falling, and MUST decrease monotonically along the
+  run without ever reaching zero. A constant pace over an approach long enough to clear the
+  mountains spends the final stretch — the part the phase exists to show — in under a second.
+- Camera framing MUST guarantee the missile is on screen for the arrival: from the moment it is
+  within about 0.85 city radii of the impact point, which on a typical run is its last two
+  seconds. Stated as a distance rather than as a time because the run length is not known when
+  the framing is solved. A missile that arrives unseen wastes the phase.
+
+**How it reads**
+
+- It MUST be bright, and it MUST NOT be a glowing dot. The airframe carries the visibility, lit
+  rather than emissive: it is kilometres up, where the key light still reaches after the ground
+  has lost it, so at the default twilight it is a white object against a darkening sky. A small
+  emitter at that range is a bloom bead with nothing legible inside it, so the exhaust plume is
+  short, sits at the bottom of 5.1's band, and dims further with distance.
+- It MUST leave a thin smoke contrail, persisting long enough to draw the whole approach back to
+  where it came over the mountains. Thin is the requirement, not incidental: a trail as wide as
+  the missile is long is a smear, and what makes a contrail read at range is its length and its
+  brightness, not its width. The contrail is lit by the same high-altitude key light the airframe
+  is, for the same reason.
 - At impact the missile is destroyed. It MUST NOT be visible in phase 5 or later.
 
 ### 7.2 Flash and blast (phases 5–6)
@@ -643,7 +676,7 @@ show.
 - The framing solver runs before the cycle starts and MUST satisfy all of these across the whole
   orbit arc, without a cut or a zoom: the city fits during phase 1; the countdown board is legible
   through phases 3 and 4 (7.6 places and turns the board against this camera, so the solver and
-  the board are solved in that order); the missile is on screen for its last 2 s; the full cloud
+  the board are solved in that order); the missile is on screen for its arrival (7.1); the full cloud
   fits at its widest in phase 8; the settled debris field fits in phase 10.
 - Cloud framing is the binding constraint — it is the widest thing in the cycle — so the solver
   MUST size the orbit radius from phase 8 and then check the rest against it.

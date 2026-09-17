@@ -100,3 +100,26 @@ float HazeAmount(float distanceMetres) {
 }
 
 #endif
+
+// How much more of the key light reaches something at this altitude than reaches the ground.
+//
+// The default time of day is twilight, and at twilight the sun is below the *ground's* horizon but
+// still well above the horizon of anything a few kilometres up: that is the whole mechanism behind
+// alpenglow and behind why a contrail overhead is white while the desert under it has gone blue.
+// Spec 7.1 wants the missile bright without being a glowing dot, and this is the honest way to
+// get it — the airframe and its trail are lit, not emissive, they are simply the only things in
+// the frame high enough to still be in the light.
+//
+// Flat at ground level so nothing else in the scene changes, and clamped, because past the point
+// where the object is fully sunlit there is no more light to give it.
+float HighAirLight(float altitudeMetres) {
+    return 1.0 + 3.2 * smoothstep(300.0, 3200.0, altitudeMetres);
+}
+
+// The same idea applied to the shadow terminator rather than to the magnitude. A surface at 3 km
+// sees the key light from a direction that is a degree or two higher than the ground does, which
+// is the difference between "the sun has set" and "the sun is setting".
+float HighAirKeyAbove(vec3 keyDirection, float altitudeMetres) {
+    float lift = 0.10 * smoothstep(300.0, 3200.0, altitudeMetres);
+    return smoothstep(-0.08, 0.06, keyDirection.y + lift);
+}

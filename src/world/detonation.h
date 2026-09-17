@@ -32,11 +32,20 @@ struct Detonation {
     core::Vec3 wind{};
 
     // Spec 7.1: the missile. One bearing and one entry point, drawn per cycle, so the approach is
-    // reproducible from the seed. The run is a straight line at constant speed from `missileStart`
-    // to `center`, arriving exactly at the end of phase 4.
+    // reproducible from the seed. The run is a straight line from `missileStart` to `center`,
+    // arriving exactly at the end of phase 4.
+    //
+    // The bearing and the descent angle are drawn in Create. The run length is not: spec 7.1
+    // requires the missile to enter *above the mountains*, and whether a given entry point does
+    // that depends on where the camera is standing and how tall the range behind it turned out —
+    // neither of which exists yet when the detonation is made. So Create sets a provisional run
+    // and AimOverRidge lengthens it once the shot and the range are solved.
     core::Vec3 missileStart{};
-    float      missileLength = 0.0f;  // metres, nose to tail
-    float      missileRadius = 0.0f;  // body radius
+    float      missileBearing = 0.0f;  // radians, the compass direction the entry lies in
+    float      missileDescent = 0.0f;  // radians below horizontal
+    float      missileRun     = 0.0f;  // metres of ground covered, entry to impact
+    float      missileLength  = 0.0f;  // metres, nose to tail
+    float      missileRadius  = 0.0f;  // body radius
 
     // Spec 7.2: the fireball. It sits at the impact point, grows fast, rises a little, and cools
     // white -> yellow -> orange -> deep red across phases 6 and 7.
@@ -62,6 +71,42 @@ struct Detonation {
     bool       MissileVisible(const Timeline& timeline, float t) const;
     core::Vec3 MissileAt(const Timeline& timeline, float t) const;
     core::Vec3 MissileDirection() const;
+
+    // How far along the path the missile is at phase progress `u`, 0 to 1. Not the identity: a
+    // re-entering warhead sheds a great deal of speed in the last few thousand metres of air, and
+    // once AimOverRidge has stretched the run out over the mountains a constant pace would cover
+    // the final approach — the part the whole phase exists to show — in under a second. This eases
+    // the last stretch to a little under half the average pace without ever stopping it.
+    //
+    // Mirrored by MissileNoseAt in shaders/particle_common.glsl, which places the contrail where
+    // the missile actually was rather than where a straight lerp would have put it.
+    static float MissileEase(float u) {
+        const float slowed = 1.0f - (1.0f - u) * (1.0f - u);
+        return core::Lerp(u, slowed, 0.55f);
+    }
+
+    // Moves the entry point to `run` metres of ground from the impact point, along the bearing and
+    // descent angle already drawn. The one place missileStart is written, so the three numbers
+    // that describe the approach cannot drift apart from the point they describe.
+    void SetMissileRun(float run);
+
+    // Where the missile is when it still has `distance` metres of its path left to fly. The
+    // framing solver of spec 11.1 sizes its missile subject from this rather than from a clock
+    // time, so that the framing does not move when AimOverRidge changes the run length: what has
+    // to be in frame is the arrival, and the arrival is a distance from the impact point.
+    core::Vec3 MissileWithin(float distance) const;
+
+    // The elevation, in radians, of the entry point as seen from `eye`. Negative means the
+    // missile appears below the viewer, which is the version of phase 4 where it slides in across
+    // the rooftops instead of coming down out of the sky.
+    float MissileEntryElevation(const core::Vec3& eye) const;
+
+    // Spec 7.1: lengthens the run, keeping the bearing and the descent angle, until the entry
+    // point clears `ridgeElevation` by `margin` radians as seen from `eye` — that is, until the
+    // missile comes in over the mountains rather than in front of them. Gives up at a cap rather
+    // than running away: a run long enough to clear a 3 km range seen from a 2.5 km camera would
+    // put the entry point inside the range itself.
+    void AimOverRidge(const core::Vec3& eye, float ridgeElevation, float margin, float maxRun);
 
     // Spec 5.1: the flash peaks at 8,000-15,000 linear. Zero outside phase 5, ramping over the
     // first ~120 ms and holding for the rest of it (spec 7.2).

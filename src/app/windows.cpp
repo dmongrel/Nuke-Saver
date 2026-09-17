@@ -194,9 +194,21 @@ int RunFullScreen(HINSTANCE instance) {
                             r.top, w, h, nullptr, nullptr, instance, nullptr);
         if (!hwnd) continue;
 
+        // Shown before it is attached, not after. A window that has not been shown has no client
+        // area, the surface reports a zero extent, and the backend is asked to build a swapchain
+        // for a surface with nothing behind it.
+        ShowWindow(hwnd, SW_SHOW);
+
         if (host.renderer && !host.renderer->AttachWindow(hwnd, w, h)) {
             // This backend cannot present here. Rather than run with a hole in the desktop,
             // drop to the fallback for every window and start the attachments again.
+            //
+            // Logged, because it used to be silent: a Vulkan renderer that constructs happily and
+            // then cannot attach leaves a log that says "renderer: vulkan" and a screen saver that
+            // draws nothing, and the only outward sign is the frame rate pinning itself to the
+            // fallback's Sleep(8).
+            Log("renderer: %s could not attach a window, falling back to GDI",
+                host.renderer->Name());
             host.renderer->WaitIdle();
             host.renderer = render::CreateGdiFallbackRenderer();
             for (HWND existing : host.windows) {
@@ -208,7 +220,6 @@ int RunFullScreen(HINSTANCE instance) {
         }
 
         host.windows.push_back(hwnd);
-        ShowWindow(hwnd, SW_SHOW);
         Log("window %p at %ld,%ld %dx%d", (void*)hwnd, r.left, r.top, w, h);
     }
 

@@ -127,13 +127,17 @@ bool SlotAge(uint j, uint n, float t0, float t1, float life, float t, out float 
     return true;
 }
 
-// The missile's nose at an arbitrary time, so a trail particle can be placed where the missile
-// actually was when it was emitted rather than where the missile is now.
+// The missile's nose at an arbitrary time, so a contrail particle can be placed where the missile
+// actually was when it was emitted rather than where the missile is now. The easing mirrors
+// Detonation::MissileEase: a contrail laid down at a constant pace behind a decelerating missile
+// bunches up at the wrong end and reads as a dashed line.
 vec3 MissileNoseAt(float tt) {
     float t0 = pp.mStart.w;
     float t1 = pp.mDir.w;
     float u  = clamp((tt - t0) / max(t1 - t0, 1e-3), 0.0, 1.0);
-    return mix(pp.mStart.xyz, pp.blast.xyz, u);
+
+    float slowed = 1.0 - (1.0 - u) * (1.0 - u);
+    return mix(pp.mStart.xyz, pp.blast.xyz, mix(u, slowed, 0.55));
 }
 
 // The same law as Detonation::ShellRadius, because the collar dust of spec 7.7 is kicked up by the
@@ -223,13 +227,19 @@ bool ParticleAt(uint index, float t, out Particle p) {
         return true;
     }
 
-    // --- 1: missile exhaust and trail (phase 4) --------------------------------------------------
+    // --- 1: missile exhaust and contrail (phase 4) -----------------------------------------------
     // One system with two populations, split by slot rather than by hash so each gets its own
-    // emission rate: a 0.4 s flame and a 6 s smoke trail cannot share a schedule.
+    // emission rate: a quarter-second flame and a ten-second contrail cannot share a schedule.
+    //
+    // The contrail is thin on purpose. It used to be born at a twelfth of a body length across and
+    // grow to half of one -- a 90 m smoke bank hanging behind a 190 m missile, which at the range
+    // the missile now enters from was the only thing visible of it: a dark smear with a bright dot
+    // at the leading end. A contrail is a scratch on the sky, and what makes it read over the
+    // mountains is its length and its brightness, not its width.
     if (sys == 1u) {
-        uint hotSlots = max(cap / 3u, 1u);
+        uint hotSlots = max(cap / 4u, 1u);
         bool hot      = j < hotSlots;
-        life          = hot ? 0.40 : 6.0;
+        life          = hot ? 0.26 : 10.0;
 
         uint local = hot ? j : j - hotSlots;
         uint n     = hot ? hotSlots : (cap - hotSlots);
@@ -245,18 +255,27 @@ bool ParticleAt(uint index, float t, out Particle p) {
         vec3 nozzle = MissileNoseAt(birth) - pp.mDir.xyz * pp.cloud.z;
 
         if (hot) {
-            p.pos      = nozzle - pp.mDir.xyz * (age * 30.0) +
-                         jit * (pp.cloud.z * 0.06 + age * 14.0);
-            p.size     = mix(pp.cloud.z * 0.10, pp.cloud.z * 0.26, u);
-            p.tint     = mix(vec3(10.0, 6.4, 2.6), vec3(3.2, 0.8, 0.16), u);
+            // The flame, kept close to the nozzle and dim enough to stay a flame. At four times
+            // this magnitude and two and a half times this size it bloomed into a featureless
+            // bead that swallowed the airframe, which is the "glowing dot" the missile is not
+            // supposed to be.
+            p.pos      = nozzle - pp.mDir.xyz * (age * 26.0) +
+                         jit * (pp.cloud.z * 0.02 + age * 5.0);
+            p.size     = mix(pp.cloud.z * 0.035, pp.cloud.z * 0.10, u);
+            p.tint     = mix(vec3(3.6, 2.1, 0.80), vec3(1.1, 0.30, 0.06), u);
             p.alpha    = 1.0 - u * u;
             p.additive = true;
         } else {
-            p.pos   = nozzle - pp.mDir.xyz * (age * 4.0) + jit * (pp.cloud.z * 0.05 + age * 2.4) +
-                      vec3(wind.x, 0.0, wind.y) * (age * 0.5) + vec3(0.0, age * 1.6, 0.0);
-            p.size  = mix(pp.cloud.z * 0.08, pp.cloud.z * 0.50, sqrt(u));
-            p.tint  = vec3(0.82, 0.79, 0.76);
-            p.alpha = 0.34 * (1.0 - u) * smoothstep(0.0, 0.05, u);
+            // The contrail. It barely moves: a smoke trail that drifts is a smoke trail, and what
+            // is wanted is the line the missile drew. It widens slowly, sags a little rather than
+            // rising, and takes almost no jitter, so the emitted points lie on the path instead of
+            // in a tube around it.
+            p.pos   = nozzle - pp.mDir.xyz * (age * 1.2) +
+                      jit * (pp.cloud.z * 0.012 + age * 0.9) +
+                      vec3(wind.x, 0.0, wind.y) * (age * 0.22) - vec3(0.0, age * 0.5, 0.0);
+            p.size  = mix(pp.cloud.z * 0.012, pp.cloud.z * 0.095, sqrt(u));
+            p.tint  = vec3(0.92, 0.90, 0.88);
+            p.alpha = 0.62 * (1.0 - u * u) * smoothstep(0.0, 0.02, u);
         }
         return true;
     }

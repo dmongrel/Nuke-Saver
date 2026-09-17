@@ -232,6 +232,7 @@ std::unique_ptr<WindowTarget> WindowTarget::Create(Context& ctx, const RenderPas
     pci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     pci.queueFamilyIndex = ctx.graphicsFamily();
     if (vkCreateCommandPool(ctx.device(), &pci, nullptr, &t->commandPool_) != VK_SUCCESS) {
+        app::Log("vulkan: command pool creation failed");
         return nullptr;
     }
 
@@ -241,6 +242,7 @@ std::unique_ptr<WindowTarget> WindowTarget::Create(Context& ctx, const RenderPas
     cbi.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cbi.commandBufferCount = kFramesInFlight;
     if (vkAllocateCommandBuffers(ctx.device(), &cbi, t->commandBuffers_) != VK_SUCCESS) {
+        app::Log("vulkan: command buffer allocation failed");
         return nullptr;
     }
 
@@ -248,6 +250,7 @@ std::unique_ptr<WindowTarget> WindowTarget::Create(Context& ctx, const RenderPas
         VkSemaphoreCreateInfo sem{};
         sem.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         if (vkCreateSemaphore(ctx.device(), &sem, nullptr, &t->imageAvailable_[i]) != VK_SUCCESS) {
+            app::Log("vulkan: semaphore creation failed");
             return nullptr;
         }
         VkFenceCreateInfo fence{};
@@ -258,13 +261,24 @@ std::unique_ptr<WindowTarget> WindowTarget::Create(Context& ctx, const RenderPas
         }
     }
 
-    if (!t->Rebuild(ctx, passes, width, height)) {
-        // A window with no area yet is fine; anything else is not, but Rebuild has already said
-        // so in the log and the caller treats nullptr as "fall back".
-        if (t->swapchain_ == VK_NULL_HANDLE) return nullptr;
+    // A window with no area yet is fine; anything else is not, and Rebuild has already said so in
+    // the log. The two are told apart by needsRebuild_, which only the no-area path sets.
+    //
+    // No-area is transient -- it is the gap between CreateWindowExW and the window actually having
+    // a client rect -- so it is waited out here rather than reported. It cannot be deferred to the
+    // first frame: the caller sizes its bloom descriptor sets from bloomLevels(), which is a
+    // property of the extent, so a target handed back without one would be wired up for a surface
+    // it does not have. And it must not be reported as a failure either: that turns a few
+    // milliseconds of window creation into a screen saver that runs on the GDI fallback and draws
+    // nothing for the rest of the session.
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        if (t->Rebuild(ctx, passes, width, height)) return t;
+        if (!t->needsRebuild_) return nullptr;  // a real failure, already logged
+        Sleep(5);
     }
 
-    return t;
+    app::Log("vulkan: the window still had no area after 200 ms");
+    return nullptr;
 }
 
 void WindowTarget::DestroySizedResources(Context& ctx) {
@@ -361,8 +375,10 @@ bool WindowTarget::Rebuild(Context& ctx, const RenderPasses& passes, uint32_t wi
     ctx.WaitIdle();
 
     VkSurfaceCapabilitiesKHR caps{};
-    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx.physicalDevice(), surface_, &caps) !=
-        VK_SUCCESS) {
+    const VkResult capsResult =
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx.physicalDevice(), surface_, &caps);
+    if (capsResult != VK_SUCCESS) {
+        app::Log("vulkan: surface capabilities query failed (%d)", static_cast<int>(capsResult));
         return false;
     }
 
@@ -440,6 +456,7 @@ bool WindowTarget::Rebuild(Context& ctx, const RenderPasses& passes, uint32_t wi
         vci.subresourceRange.levelCount = 1;
         vci.subresourceRange.layerCount = 1;
         if (vkCreateImageView(ctx.device(), &vci, nullptr, &imageViews_[i]) != VK_SUCCESS) {
+            app::Log("vulkan: swapchain image view %u failed", i);
             return false;
         }
 
@@ -452,6 +469,7 @@ bool WindowTarget::Rebuild(Context& ctx, const RenderPasses& passes, uint32_t wi
         fci.height          = extent_.height;
         fci.layers          = 1;
         if (vkCreateFramebuffer(ctx.device(), &fci, nullptr, &presentFbos_[i]) != VK_SUCCESS) {
+            app::Log("vulkan: present framebuffer %u failed", i);
             return false;
         }
 

@@ -8,7 +8,7 @@
 #   make            build nuke-saver.scr
 #   make selftest   build and run the console toolchain probe (build/nuke-saver-selftest.exe)
 #   make clean      remove everything generated
-#   make install    copy the .scr into System32 (requires Administrator)
+#   make install    install for the current user and select it as the screen saver
 
 CXX      = g++
 CC       = gcc
@@ -140,5 +140,28 @@ clean:
 # and it will be built with its dependencies recorded.
 -include $(DEPS)
 
+# Installed under the user's AppData rather than into System32, for two reasons. System32 needs
+# Administrator, and Windows is happy to run a screen saver from anywhere as long as the registry
+# names a full path. And it must not be the build output: Windows holds the running .scr open, so
+# a screen saver that kicks in while the machine is idle makes the next link fail with a permission
+# error that says nothing about what is holding the file.
+#
+# The destination is read out of the registry rather than out of the environment. Make runs its
+# recipes through the MSYS shell, which is started here with almost nothing in it: LOCALAPPDATA,
+# USERPROFILE and APPDATA are all empty, and HOME is the MSYS home rather than the Windows profile.
+# Shell Folders is where that answer actually lives, and reg.exe is already needed below.
+SHELLFOLDERS = HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders
+DESKTOPKEY   = HKCU\\Control Panel\\Desktop
+
 install: $(TARGET)
-	cp $(TARGET) "$(SYSTEMROOT)/System32/"
+	@local=$$(reg.exe query "$(SHELLFOLDERS)" //v "Local AppData" \
+		| sed -n 's/.*REG_[A-Z_]*[[:space:]]*//p' | tr -d '\r'); \
+	test -n "$$local" || { echo "could not find Local AppData in the registry" >&2; exit 1; }; \
+	dir=$$(cygpath -u "$$local")/Nuke-Saver; \
+	mkdir -p "$$dir"; \
+	cp $(TARGET) "$$dir/$(TARGET)"; \
+	win="$$(cygpath -w "$$dir")\\$(TARGET)"; \
+	reg.exe add "$(DESKTOPKEY)" //v SCRNSAVE.EXE //t REG_SZ //d "$$win" //f > /dev/null; \
+	reg.exe add "$(DESKTOPKEY)" //v ScreenSaveActive //t REG_SZ //d 1 //f > /dev/null; \
+	echo "installed $$win and selected it as the screen saver"; \
+	echo "the timeout and the lock-on-resume setting are left alone; change them in Settings"

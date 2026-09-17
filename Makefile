@@ -67,9 +67,15 @@ SHADER_INCS  := $(sort $(wildcard shaders/*.glsl))
 SPVS         := $(patsubst shaders/%,$(SPVDIR)/%.spv,$(SHADER_SRCS))
 SHADER_C     := $(GENDIR)/shaders_generated.c
 
+# The preview thumbnail (spec 9.3). A baked still rather than something generated at build time:
+# making it needs a GPU and a run, which a build does not have.
+THUMB_BIN    := assets/preview_thumb.bin
+THUMB_C      := $(GENDIR)/preview_generated.c
+
 APP_OBJS     := $(APP_CXX_SRCS:%.cpp=$(OBJDIR)/%.o) \
                 $(C_SRCS:%.c=$(OBJDIR)/%.o) \
-                $(SHADER_C:$(GENDIR)/%.c=$(OBJDIR)/gen/%.o)
+                $(SHADER_C:$(GENDIR)/%.c=$(OBJDIR)/gen/%.o) \
+                $(THUMB_C:$(GENDIR)/%.c=$(OBJDIR)/gen/%.o)
 SELFTEST_OBJS := $(filter-out $(OBJDIR)/src/main.o,$(APP_OBJS))                  $(SELFTEST_SRCS:%.cpp=$(OBJDIR)/%.o)
 
 SELFTEST_EXE := $(BUILD)/nuke-saver-selftest.exe
@@ -92,6 +98,9 @@ $(SPVDIR)/%.spv: shaders/% $(SHADER_INCS) | $(SPVDIR)
 # One generated TU holding every blob plus the lookup table.
 $(SHADER_C): $(SPVS) tools/embed_shaders.sh | $(GENDIR)
 	sh tools/embed_shaders.sh $@ $(SPVS)
+
+$(THUMB_C): $(THUMB_BIN) tools/embed_blob.sh | $(GENDIR)
+	sh tools/embed_blob.sh $@ app/preview_image.h g_preview_thumb $(THUMB_BIN)
 
 # ---- objects ---------------------------------------------------------------------------
 # Every object depends on the Makefile: a change to CPPFLAGS is a change to what the code

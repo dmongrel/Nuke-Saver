@@ -719,15 +719,17 @@ Preview windows are a few hundred pixels across and the host may destroy them at
 Standing up a Vulkan device for that is not worth the risk or the wait.
 
 - Preview MUST NOT initialise Vulkan.
-- It MUST cross-fade slowly between a small number of stills baked into the executable's
-  resources — frames captured from a real run, one per major phase.
+- It MUST paint one still baked into the executable: a frame of the mushroom cloud captured from a
+  real run. One image, not a filmstrip and not a cross-fade. The pane is a hundred and fifty
+  pixels wide inside a dialog that may be closed within a second or two, and a single recognisable
+  frame answers "what is this screen saver" faster than any animation of it could — an animation
+  there costs a baked sequence, a timer and a blend, and buys nothing the still does not already
+  say.
+- The still MUST be scaled to the pane preserving its aspect, letterboxed rather than stretched.
+  The pane's shape is the host dialog's business and is not always the image's.
+- If the embedded image is absent or malformed, preview MUST fall back to painting black rather
+  than drawing whatever follows it in memory.
 - It MUST survive its parent window vanishing.
-
-**Interim state.** The stills cannot exist until there is a renderer to capture them from, which
-makes baking them an M6 task. Until then, preview MUST paint black and MUST still meet every
-other requirement above — no Vulkan, no crash when the parent goes away, correct exit. A black
-preview is an accepted interim state, not an open defect, and A7 is scored against the behavior
-rather than the picture until M6.
 
 ## 10. Settings
 
@@ -868,7 +870,7 @@ confirmation it took.
 | A4 | Move the mouse | Same, and not triggered by the spurious first move |
 | A5 | Two consecutive cycles | Different city, different camera shot |
 | A6 | Same seed forced twice | Identical city, missile approach and gross cloud shape |
-| A7 | Preview in Screen Saver Settings | Creates no Vulkan device, survives dialog close; black before M6, cross-fading stills after |
+| A7 | Preview in Screen Saver Settings | Creates no Vulkan device, survives dialog close and exits 0; shows the baked mushroom-cloud still, letterboxed to the pane at any size |
 | A8 | `/c` | Dialog opens, all three settings persist across a restart |
 | A9 | Rename `vulkan-1.dll` and run | Black screen saver, exits on input, no error dialog |
 | A10 | Reference machine, medium, 3440×1440 | 60 FPS sustained through phases 6–9 |

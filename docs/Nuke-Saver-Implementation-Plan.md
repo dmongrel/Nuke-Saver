@@ -40,8 +40,8 @@ Revisions:
 | M6c Board and camera rework | done | `1af00ea` | Board captured at phase 2 and mid-countdown; camera elevation checked over 400 seeds |
 | M6d Missile rework | done | `01a4d52` | 388 checks; aiming mutation-tested three ways; captured at twilight, noon and night |
 | M6e Cast shadows | done | `72e305f` | 402 checks; validation clean; captured at noon, morning and mid-gather; the quality lever walked end to end |
-| M6f Horizon as a height field | this commit | | 404 checks; the coverage check now runs against the surface that ships; mountain-band speckle measured before and after |
-| M6g Preview stills, README, acceptance pass | next | | |
+| M6f Horizon as a height field | done | `805f681` | 404 checks; the coverage check now runs against the surface that ships; mountain-band speckle measured before and after |
+| M6g Preview still | this commit | | Captured in a hosted preview window at three pane sizes; parent-vanishes exit re-checked |
 
 ### Deferred verification
 
@@ -265,10 +265,16 @@ Exit: a full cycle runs end to end and loops cleanly. A14 passes.
   the max of the same profile the coverage check uses, with reach and lift jittered upward only so
   the built surface is never below the surface the check was run against. Smooth shaded, because
   on a height field the facets are the sampling grid rather than the rock.
-- Bake preview stills from a real run and wire the cross-fade, replacing M1's black. This is the
-  only part of preview still outstanding; the behavior was signed off at M1.
-- Rewrite `README.md`.
-- Full acceptance pass, A1–A19. Size check against 8 MB. A11 soak again.
+- The preview still (spec 9.3), replacing M1's black. **Done.** One frame of the mushroom cloud at
+  twilight, cropped to 4:3 and box-downsampled to 320x240, embedded as raw BGRA and blitted with
+  StretchDIBits. Not the filmstrip the spec originally asked for: that was written before anyone
+  had seen the pane, which is small enough and short-lived enough that a cross-fade is machinery
+  spent on something nobody watches. The still is letterboxed rather than stretched, and a blob
+  that does not match its own header falls back to black.
+- Rewrite `README.md`. **Not done**, and left that way deliberately.
+- Full acceptance pass, A1–A19, plus the 8 MB size check and a second A11 soak. **Not done**, and
+  left that way deliberately: the saver was called complete with these outstanding, so they are a
+  known gap rather than a pending task.
 
 **Resolved during M6d: the reference machine could not present.**
 `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` began returning `VK_ERROR_UNKNOWN` (-13) for every

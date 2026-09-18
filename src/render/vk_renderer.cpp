@@ -118,9 +118,9 @@ static_assert(sizeof(BloomPush) == 32, "BloomPush must fit the guaranteed push r
 // component. Going one vec4 over would mean a uniform buffer, and a uniform buffer written once a
 // frame and read by two windows with independent frame slots is a hazard this does not need.
 struct ParticlePush {
-    uint32_t caps[4]{};    // slot counts of systems 0..3
-    float    tail[4]{};    // x system 4 slots, y gravity, zw horizontal wind
-    float    timing[4]{};  // x cycle time, y growth start, z growth end, w city radius
+    uint32_t caps[4]{};    // slot counts of all four systems
+    float    tail[4]{};    // x spare, y gravity, zw horizontal wind
+    float    timing[4]{};  // x cycle time, yz spare, w city radius
     float    mStart[4]{};  // xyz missile entry point, w missile phase start
     float    mDir[4]{};    // xyz missile direction, w missile phase end
     float    blast[4]{};   // xyz impact point, w the shell's final reach
@@ -2019,14 +2019,11 @@ private:
 
         ParticlePush push;
         for (uint32_t i = 0; i < 4; ++i) push.caps[i] = ParticleCapacity(static_cast<int>(i), q);
-        push.tail[0] = static_cast<float>(ParticleCapacity(4, q));
         push.tail[1] = det.gravity;
         push.tail[2] = det.wind.x;
         push.tail[3] = det.wind.z;
 
         push.timing[0] = t;
-        push.timing[1] = tl.Start(world::Phase::Growth);
-        push.timing[2] = tl.End(world::Phase::Growth);
         push.timing[3] = world_.cityRadius;
 
         const core::Vec3 dir = det.MissileDirection();

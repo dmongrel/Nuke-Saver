@@ -20,16 +20,21 @@
 
 namespace render {
 
-constexpr int kParticleSystemCount = 5;
+constexpr int kParticleSystemCount = 4;
 
-// Spec 8.3's peak live counts, in the order of its table: growth puffs, missile exhaust and
-// trail, ground collar dust, settled dust, embers.
-constexpr uint32_t kParticlePeak[kParticleSystemCount] = {10000, 15000, 30000, 20000, 8000};
+// Spec 8.3's peak live counts, in the order of its table: missile exhaust and trail, ground
+// collar dust, settled dust, embers.
+//
+// There is nothing for phase 1. An earlier version kicked dust up under the rising city, which
+// made the growth read as construction rather than as the city simply being there -- and dust is
+// what the back half of the cycle is made of, so spending it here cost the detonation its one
+// visual idea.
+constexpr uint32_t kParticlePeak[kParticleSystemCount] = {15000, 30000, 20000, 8000};
 
-// Each system's particle lifetime in seconds, mirroring shaders/particle_common.glsl. System 1
+// Each system's particle lifetime in seconds, mirroring shaders/particle_common.glsl. System 0
 // carries two populations with different lifetimes; the figure here is the trail's, because the
 // trail is the one whose persistence spec 7.1 has an opinion about.
-constexpr float kParticleLife[kParticleSystemCount] = {2.6f, 6.0f, 6.0f, 30.0f, 5.0f};
+constexpr float kParticleLife[kParticleSystemCount] = {6.0f, 6.0f, 30.0f, 5.0f};
 
 // Depth buckets for the back-to-front sort. Mirrors kSortBuckets in the shader.
 constexpr uint32_t kSortBuckets = 256;

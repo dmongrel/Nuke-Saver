@@ -18,7 +18,7 @@
 #ifndef NUKE_SAVER_PARTICLE_COMMON_GLSL
 #define NUKE_SAVER_PARTICLE_COMMON_GLSL
 
-const uint kParticleSystems = 5u;
+const uint kParticleSystems = 4u;
 
 // Depth buckets for the back-to-front sort. 256 is one workgroup for the prefix sum and fine
 // enough that the ordering error inside a bucket is smaller than one particle's own extent.
@@ -70,12 +70,11 @@ uint SystemCapacity(uint s) {
     if (s == 0u) return pp.caps.x;
     if (s == 1u) return pp.caps.y;
     if (s == 2u) return pp.caps.z;
-    if (s == 3u) return pp.caps.w;
-    return uint(pp.tail.x);
+    return pp.caps.w;
 }
 
 uint ParticleTotal() {
-    return pp.caps.x + pp.caps.y + pp.caps.z + pp.caps.w + uint(pp.tail.x);
+    return pp.caps.x + pp.caps.y + pp.caps.z + pp.caps.w;
 }
 #endif
 
@@ -209,38 +208,7 @@ bool ParticleAt(uint index, float t, out Particle p) {
 
     p.system = sys;
 
-    // --- 0: growth puffs (phase 1) ---------------------------------------------------------------
-    // Dust kicked up under the rising city. Spread over the footprint rather than tied to
-    // individual buildings: the building list lives in the fragment set, and at this density a
-    // puff that is near a building is indistinguishable from one that is on it.
-    if (sys == 0u) {
-        life = 2.6;
-        if (!SlotAge(j, cap, pp.timing.y, pp.timing.z, life, t, age, gen)) return false;
-
-        uint  seed  = j * 131u + gen * 7919u;
-        float u     = age / life;
-        float birth = t - age;
-        float a     = PHash(seed, 1u) * 6.2831853;
-        p.rnd       = PHash(seed, 3u);
-
-        // On the construction front, not over the whole footprint. Spec 6.5 grows the city
-        // outward from the centre, and city.cpp puts a building at normalised radius x at
-        // pow(x, 0.7) through the phase; this is that inverted, so the dust sweeps outward with
-        // the buildings instead of hanging over desert that is still empty.
-        float progress = clamp((birth - pp.timing.y) / max(pp.timing.z - pp.timing.y, 1e-3),
-                               0.0, 1.0);
-        float front    = pow(progress, 1.0 / 0.7);
-        float r        = pp.timing.w * clamp(front + (PHash(seed, 2u) - 0.5) * 0.24, 0.0, 1.0);
-
-        p.pos   = vec3(cos(a) * r, 1.0 + age * (1.4 + 1.6 * p.rnd), sin(a) * r) +
-                  vec3(wind.x, 0.0, wind.y) * (age * 0.25);
-        p.size  = mix(4.0, 19.0, u) * (0.6 + 0.8 * p.rnd);
-        p.tint  = vec3(0.46, 0.36, 0.26);
-        p.alpha = 0.32 * sin(3.14159265 * u);
-        return true;
-    }
-
-    // --- 1: missile exhaust and contrail (phase 4) -----------------------------------------------
+    // --- 0: missile exhaust and contrail (phase 4) -----------------------------------------------
     // One system with two populations, split by slot rather than by hash so each gets its own
     // emission rate: a quarter-second flame and a ten-second contrail cannot share a schedule.
     //
@@ -249,7 +217,7 @@ bool ParticleAt(uint index, float t, out Particle p) {
     // the missile now enters from was the only thing visible of it: a dark smear with a bright dot
     // at the leading end. A contrail is a scratch on the sky, and what makes it read over the
     // mountains is its length and its brightness, not its width.
-    if (sys == 1u) {
+    if (sys == 0u) {
         uint hotSlots = max(cap / 5u, 1u);
         bool hot      = j < hotSlots;
 
@@ -313,10 +281,10 @@ bool ParticleAt(uint index, float t, out Particle p) {
         return true;
     }
 
-    // --- 2: ground collar dust (phases 6-7) ------------------------------------------------------
+    // --- 1: ground collar dust (phases 6-7) ------------------------------------------------------
     // The base surge: a skirt of dust thrown up where the shell meets the ground, born on the
     // front and left behind by it (spec 7.7).
-    if (sys == 2u) {
+    if (sys == 1u) {
         life     = 6.0;
         float t0 = pp.phases.x;
         float t1 = pp.phases.x + pp.phases.y * 0.55;
@@ -340,10 +308,10 @@ bool ParticleAt(uint index, float t, out Particle p) {
         return true;
     }
 
-    // --- 3: settled dust (phases 7-10) -----------------------------------------------------------
+    // --- 2: settled dust (phases 7-10) -----------------------------------------------------------
     // What is left hanging over the footprint once the debris is down. Low, wide and very faint:
     // its job is to keep the basin from reading as clean desert for the last half of the cycle.
-    if (sys == 3u) {
+    if (sys == 2u) {
         life     = 30.0;
         float t0 = pp.phases.x + pp.phases.y * 0.6;
         float t1 = pp.phases.w;
@@ -364,7 +332,7 @@ bool ParticleAt(uint index, float t, out Particle p) {
         return true;
     }
 
-    // --- 4: embers (phases 8-9) ------------------------------------------------------------------
+    // --- 3: embers (phases 8-9) ------------------------------------------------------------------
     // Hot points carried up the stem while the cloud is gathering, and grey ash shed by it once
     // the cloud lets go. Additive, tiny and flickering while they are still burning: they are the
     // one thing in the back half of the cycle that is still emitting.

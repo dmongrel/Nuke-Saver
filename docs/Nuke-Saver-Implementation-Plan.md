@@ -225,12 +225,14 @@ Exit: a full cycle runs end to end and loops cleanly. A14 passes.
 
 ### M6 — Particles and finish
 
-- The five particle systems (spec 8.3). **Done.** Stateless: a particle's position, size, colour
+- The particle systems (spec 8.3). **Done.** Four of them; a fifth kicked dust up under the
+  rising city in phase 1 and was removed, because it made the growth read as construction work and
+  spent on the front half of the cycle the one visual idea the detonation has. Stateless: a particle's position, size, colour
   and opacity are a closed-form function of its index and the clock, so there is no particle
   buffer, no emitter to step and no slot allocation. The only particle memory in the project is
   the per-window sorted index list, and the only per-frame work is three small compute passes that
   bucket that list by depth.
-- Embers, settled dust, smoke. **Done** — they are three of the five.
+- Embers, settled dust, smoke. **Done** — they are three of the four.
 - Quality scaler and the auto-quality controller (spec 11.2). **Done.** One lever cannot move
   inside a cycle: the fragment budget re-cuts every building, which means a repack, a nine-megabyte
   reallocation and an init pass with the device idle. Stalling to recover from a stall is not a

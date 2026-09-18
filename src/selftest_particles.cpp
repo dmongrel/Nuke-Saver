@@ -39,13 +39,13 @@ void TestParticles() {
     std::printf("particles (spec 8.3)\n");
 
     // Spec 8.3's table, at the top quality level, exactly.
-    const uint32_t expected[kParticleSystemCount] = {10000, 15000, 30000, 20000, 8000};
+    const uint32_t expected[kParticleSystemCount] = {15000, 30000, 20000, 8000};
     bool           peaksMatch                     = true;
     for (int i = 0; i < kParticleSystemCount; ++i) {
         if (ParticleCapacity(i, 0) != expected[i]) peaksMatch = false;
     }
-    Check(peaksMatch, "the five peak counts are spec 8.3's table");
-    Check(ParticleTotal(0) == 83000, "83,000 slots in total at the top level");
+    Check(peaksMatch, "the four peak counts are spec 8.3's table");
+    Check(ParticleTotal(0) == 73000, "73,000 slots in total at the top level");
 
     // Spec 11.2 gives up particle counts as quality falls, and it has to be a real ladder: a
     // level that costs the same as the one above it buys the frame-time controller nothing.
@@ -60,15 +60,15 @@ void TestParticles() {
     // Out-of-range indices are asked for by nothing, which is why they are worth pinning: a
     // silently wrong answer here would be a silently undersized buffer.
     Check(ParticleCapacity(-1, 0) == 0 && ParticleCapacity(kParticleSystemCount, 0) == 0,
-          "a system outside the five has no slots");
+          "a system outside the four has no slots");
 
 
     const float t0   = 10.0f;
     const float t1   = 30.0f;
     const float life = 4.0f;
 
-    // Nothing exists before the window opens. The growth puffs of spec 8.3 run in phase 1, and
-    // phase 0 is specified as bare desert.
+    // Nothing exists before the window opens. No system emits before the missile does, and the
+    // phases in front of that are specified as bare desert and then a city standing on it.
     Check(ParticleLiveCount(kSlots, t0, t1, life, t0 - 0.001f) == 0,
           "no particle is alive before the emission window opens");
 
@@ -157,7 +157,6 @@ void TestParticles() {
         const world::Timeline tl = world::Timeline::Create(seed * 7919u);
 
         const float windows[kParticleSystemCount][2] = {
-            {tl.Start(world::Phase::Growth), tl.End(world::Phase::Growth)},
             {tl.Start(world::Phase::Missile), tl.End(world::Phase::Missile)},
             {tl.Start(world::Phase::Blast), tl.Start(world::Phase::Blast) +
                                                 tl.Duration(world::Phase::Blast) * 0.55f},
@@ -181,7 +180,7 @@ void TestParticles() {
         }
     }
     Check(everySystemRuns,
-          "all five systems have a non-empty window and live particles in it, "
+          "all four systems have a non-empty window and live particles in it, "
           "for sixty-four seeds");
 
     // The trail has to still be there when the fireball lights it, or spec 7.1's persistence buys
@@ -192,7 +191,7 @@ void TestParticles() {
         const float           open    = tl.Start(world::Phase::Missile);
         const float           shut    = tl.End(world::Phase::Missile);
         const float           atFlash = tl.End(world::Phase::Flash);
-        if (ParticleLiveCount(256, open, shut, kParticleLife[1], atFlash) == 0) {
+        if (ParticleLiveCount(256, open, shut, kParticleLife[0], atFlash) == 0) {
             trailSurvivesImpact = false;
         }
     }

@@ -323,7 +323,10 @@ Requirements:
 - A building rises from zero height to full height over 0.4–0.9 s, scaling on Y only, with an
   ease-out so it decelerates into place. It MUST NOT overshoot or bounce.
 - A building MUST NOT be visible before its start time.
-- A small dust puff at the base on emergence is permitted and encouraged.
+- No dust. An earlier version kicked a puff up under each building as it emerged, and it made
+  the growth read as construction work rather than as the city simply being there. Dust is what
+  the back half of the cycle is made of, and spending it in phase 1 costs the detonation the one
+  visual idea it has.
 - The countdown board (7.6) rises **last**, after the final building, so the eye is left on it
   going into phase 2.
 - Everything MUST be standing before phase 2 ends.
@@ -666,7 +669,6 @@ Separate from fragments (7.3), which are their own system.
 
 | System | Peak live | Phases |
 |---|---:|---|
-| Growth puffs | 10,000 | 1 |
 | Missile exhaust and trail | 15,000 | 4 |
 | Ground collar dust | 30,000 | 6–7 |
 | Settled dust | 20,000 | 7–10 |

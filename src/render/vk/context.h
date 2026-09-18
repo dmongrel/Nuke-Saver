@@ -43,6 +43,11 @@ public:
     bool deviceLost() const { return deviceLost_; }
     void NoteDeviceLost() { deviceLost_ = true; }
 
+    // The bloom chain's format: kBloomFormat where the device can use it as a storage image,
+    // kHdrFormat where it cannot. Decided once, at device creation, because the image and the
+    // shaders that bind it must agree (see kBloomFormat).
+    VkFormat bloomFormat() const { return bloomFormat_; }
+
 private:
     Context() = default;
 
@@ -55,12 +60,21 @@ private:
     VmaAllocator             allocator_      = VK_NULL_HANDLE;
 
     VkPhysicalDeviceProperties properties_{};
-    bool                       deviceLost_ = false;
+    bool                       deviceLost_  = false;
+    VkFormat                   bloomFormat_ = VK_FORMAT_R16G16B16A16_SFLOAT;
 };
 
 // Formats the project depends on, resolved once at startup.
 constexpr VkFormat kHdrFormat       = VK_FORMAT_R16G16B16A16_SFLOAT;  // spec 8.1
 constexpr VkFormat kSwapchainFormat = VK_FORMAT_B8G8R8A8_UNORM;       // spec 8.1
+
+// The bloom chain, where the device allows it. Half the bytes of kHdrFormat, and the chain's passes
+// are bound by bytes: bloom is never negative and never needs alpha, and it is mixed in at a few
+// percent and dithered, so six bits of mantissa (five in blue) do not show in it. A storage image
+// in this format needs an optional device feature, so Context::bloomFormat() says which one the
+// chain actually uses. The bloom shaders name the format in their image qualifiers: bloom_down.comp
+// and bloom_up.comp are built for this one, and the Makefile builds _f16 variants for kHdrFormat.
+constexpr VkFormat kBloomFormat     = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
 
 }  // namespace render::vk
 

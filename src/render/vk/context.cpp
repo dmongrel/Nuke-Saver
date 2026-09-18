@@ -193,7 +193,24 @@ std::unique_ptr<Context> Context::Create(bool enableValidation) {
     qci.queueCount       = 1;
     qci.pQueuePriorities = &priority;
 
+    // Nothing is required. The one optional feature is what lets the bloom chain use its packed
+    // float format; without it, or without the format's own storage support, the chain stays in
+    // the HDR format and the bloom shaders' _f16 variants bind it.
+    VkPhysicalDeviceFeatures supported{};
+    vkGetPhysicalDeviceFeatures(ctx->physical_, &supported);
+
+    VkFormatProperties bloomProps{};
+    vkGetPhysicalDeviceFormatProperties(ctx->physical_, kBloomFormat, &bloomProps);
+    const VkFormatFeatureFlags bloomNeeds = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
+                                            VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    const bool packedBloom = supported.shaderStorageImageExtendedFormats == VK_TRUE &&
+                             (bloomProps.optimalTilingFeatures & bloomNeeds) == bloomNeeds;
+
     VkPhysicalDeviceFeatures features{};
+    features.shaderStorageImageExtendedFormats = packedBloom ? VK_TRUE : VK_FALSE;
+    ctx->bloomFormat_ = packedBloom ? kBloomFormat : kHdrFormat;
+    if (!packedBloom) app::Log("vulkan: bloom chain stays in the HDR format");
 
     VkDeviceCreateInfo dci{};
     dci.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;

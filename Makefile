@@ -65,6 +65,9 @@ SHADER_SRCS  := $(sort $(wildcard shaders/*.vert shaders/*.frag shaders/*.comp))
 # editing scene.glsl without rebuilding the shaders that read it is a mismatch nothing reports.
 SHADER_INCS  := $(sort $(wildcard shaders/*.glsl))
 SPVS         := $(patsubst shaders/%,$(SPVDIR)/%.spv,$(SHADER_SRCS))
+# The bloom shaders again, for a chain in the HDR format: they name their storage format in the
+# image qualifier, and a device without the packed float format as a storage image gets these.
+SPVS         += $(SPVDIR)/bloom_down_f16.comp.spv $(SPVDIR)/bloom_up_f16.comp.spv
 SHADER_C     := $(GENDIR)/shaders_generated.c
 
 # The preview thumbnail (spec 9.3). A baked still rather than something generated at build time:
@@ -94,6 +97,9 @@ all: $(TARGET)
 
 $(SPVDIR)/%.spv: shaders/% $(SHADER_INCS) | $(SPVDIR)
 	$(GLSLC) -Werror -O -Ishaders -o $@ $<
+
+$(SPVDIR)/%_f16.comp.spv: shaders/%.comp $(SHADER_INCS) | $(SPVDIR)
+	$(GLSLC) -Werror -O -Ishaders -DBLOOM_FORMAT=rgba16f -o $@ $<
 
 # One generated TU holding every blob plus the lookup table.
 $(SHADER_C): $(SPVS) tools/embed_shaders.sh | $(GENDIR)

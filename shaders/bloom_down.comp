@@ -17,8 +17,15 @@
 // clear and the merge, exactly as in exposure_histogram.comp.
 layout(local_size_x = 16, local_size_y = 16) in;
 
+// The chain's storage format, which must match the image's (vk::kBloomFormat). The Makefile also
+// builds this file with BLOOM_FORMAT=rgba16f, as the _f16 variant, for a device that cannot store
+// the packed format.
+#ifndef BLOOM_FORMAT
+#define BLOOM_FORMAT r11f_g11f_b10f
+#endif
+
 layout(set = 0, binding = 0) uniform sampler2D uSource;
-layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D uDestination;
+layout(set = 0, binding = 1, BLOOM_FORMAT) uniform writeonly image2D uDestination;
 
 #define EXPOSURE_BINDING 2
 #include "exposure.glsl"

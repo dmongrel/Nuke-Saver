@@ -387,7 +387,7 @@ bool WindowTarget::CreateBloomChain(Context& ctx) {
     VkImageCreateInfo ici{};
     ici.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     ici.imageType     = VK_IMAGE_TYPE_2D;
-    ici.format        = kHdrFormat;
+    ici.format        = ctx.bloomFormat();
     ici.extent        = {bloomExtent(0).width, bloomExtent(0).height, 1};
     ici.mipLevels     = levels;
     ici.arrayLayers   = 1;
@@ -414,7 +414,7 @@ bool WindowTarget::CreateBloomChain(Context& ctx) {
         vci.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         vci.image                           = bloomImage_;
         vci.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
-        vci.format                          = kHdrFormat;
+        vci.format                          = ctx.bloomFormat();
         vci.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
         vci.subresourceRange.baseMipLevel   = i;
         vci.subresourceRange.levelCount     = 1;

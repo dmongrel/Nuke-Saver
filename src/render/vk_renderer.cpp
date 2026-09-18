@@ -653,8 +653,12 @@ public:
         adaptPipeline_ = CreateComputePipeline(dev, "exposure_adapt.comp", tonemapPipelineLayout_);
         if (!histogramPipeline_ || !adaptPipeline_) return false;
 
-        bloomDownPipeline_ = CreateComputePipeline(dev, "bloom_down.comp", bloomPipelineLayout_);
-        bloomUpPipeline_   = CreateComputePipeline(dev, "bloom_up.comp", bloomPipelineLayout_);
+        // The build of each bloom shader whose image qualifier matches the chain's format.
+        const bool packedBloom = ctx_->bloomFormat() == vk::kBloomFormat;
+        bloomDownPipeline_ = CreateComputePipeline(
+            dev, packedBloom ? "bloom_down.comp" : "bloom_down_f16.comp", bloomPipelineLayout_);
+        bloomUpPipeline_ = CreateComputePipeline(
+            dev, packedBloom ? "bloom_up.comp" : "bloom_up_f16.comp", bloomPipelineLayout_);
         if (!bloomDownPipeline_ || !bloomUpPipeline_) return false;
 
         // The first cycle's world already exists by now; every later one goes through ResetCycle,

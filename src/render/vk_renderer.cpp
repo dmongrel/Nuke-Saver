@@ -957,11 +957,12 @@ private:
         // The key light's depth map (spec 8.2). In the scene set rather than threaded through each
         // surface pipeline for the same reason the fireball is: four pipelines read it and they
         // all already have this set bound. Pipelines whose shaders never declare it are unharmed
-        // by its being here.
+        // by its being here. The vertex stage too, for the particles, which light their dust at
+        // the corners.
         bindings[1].binding         = 1;
         bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         bindings[1].descriptorCount = 1;
-        bindings[1].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[1].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo dsl{};
         dsl.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;

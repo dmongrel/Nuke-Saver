@@ -116,9 +116,7 @@ void main() {
 
     Particle p;
     // A particle at or under the fragment stage's alpha threshold draws nothing, so it is culled
-    // here with the dead ones. Not in the sort passes: taking it out of the buckets changes the
-    // order the atomics hand out slots inside a bucket, and with dust lit by the fireball that
-    // reorders blends visibly.
+    // here with the dead ones.
     if (slot == kParticleNone || !ParticleAt(slot, pp.timing.x, p) || p.alpha <= 0.002) {
         // Behind the far plane, so the clipper throws the whole triangle away before it rasterises.
         gl_Position = vec4(0.0, 0.0, 2.0, 1.0);

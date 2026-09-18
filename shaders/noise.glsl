@@ -17,57 +17,50 @@ vec2 Hash22(vec2 p) {
     return fract((q.xx + q.yz) * q.zy);
 }
 
-// Gradient noise, roughly [-1,1]. Quintic fade, because this drives a normal and Perlin's cubic
-// creases visibly once you differentiate it.
+// Gradient noise, roughly [-1,1], with its derivative. Quintic fade, because this drives a normal
+// and Perlin's cubic creases visibly once you differentiate it.
 //
-// GradientCorners is the noise given its cell `i` and the four corner gradients; the hashing is
-// left to the caller, so one that evaluates several nearby points can hash each corner once.
-float GradientCorners(vec2 p, vec2 i, vec2 g00, vec2 g10, vec2 g01, vec2 g11) {
-    vec2 f = p - i;
-    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+// Returns (value, d/dx, d/dy). The derivative is the analytic one, from the same four corner
+// gradients the value uses, so a caller after a slope pays for one evaluation rather than the three
+// a finite difference needs.
+vec2 Gradient(vec2 corner) { return Hash22(corner) * 2.0 - 1.0; }
+
+vec3 GradientNoise2D(vec2 p) {
+    vec2 i  = floor(p);
+    vec2 f  = p - i;
+    vec2 u  = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    vec2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+
+    vec2 g00 = Gradient(i + vec2(0.0, 0.0));
+    vec2 g10 = Gradient(i + vec2(1.0, 0.0));
+    vec2 g01 = Gradient(i + vec2(0.0, 1.0));
+    vec2 g11 = Gradient(i + vec2(1.0, 1.0));
 
     float n00 = dot(g00, f - vec2(0.0, 0.0));
     float n10 = dot(g10, f - vec2(1.0, 0.0));
     float n01 = dot(g01, f - vec2(0.0, 1.0));
     float n11 = dot(g11, f - vec2(1.0, 1.0));
 
-    return mix(mix(n00, n10, u.x), mix(n01, n11, u.x), u.y) * 1.414;
+    // n = n00 + u.x (n10 - n00) + u.y (n01 - n00) + u.x u.y k, differentiated term by term: each
+    // corner's own gradient through the blend weights, plus the weights' change through du.
+    float k     = n00 - n10 - n01 + n11;
+    float value = n00 + u.x * (n10 - n00) + u.y * (n01 - n00) + u.x * u.y * k;
+    vec2  slope = g00 + u.x * (g10 - g00) + u.y * (g01 - g00) + u.x * u.y * (g00 - g10 - g01 + g11) +
+                 du * (vec2(n10, n01) - n00 + u.yx * k);
+
+    return vec3(value, slope) * 1.414;
 }
 
-vec2 Gradient(vec2 corner) { return Hash22(corner) * 2.0 - 1.0; }
-
-// Gradient noise at p and at two neighbours, px displaced from it along +x only and pz along +y
-// only, each by less than one lattice cell. The three cells then share corners — px sits in p's
-// cell or the one to its right, pz in p's cell or the one above — so eight hashes cover what
-// three separate evaluations would hash twelve for. Every hash input is the same integer lattice
-// point a separate evaluation would use, so the result is theirs, not an approximation of it.
-vec3 GradientNoise2x3(vec2 p, vec2 px, vec2 pz) {
-    vec2 i   = floor(p);
-    vec2 g00 = Gradient(i + vec2(0.0, 0.0)), g10 = Gradient(i + vec2(1.0, 0.0));
-    vec2 g01 = Gradient(i + vec2(0.0, 1.0)), g11 = Gradient(i + vec2(1.0, 1.0));
-    vec2 g20 = Gradient(i + vec2(2.0, 0.0)), g21 = Gradient(i + vec2(2.0, 1.0));
-    vec2 g02 = Gradient(i + vec2(0.0, 2.0)), g12 = Gradient(i + vec2(1.0, 2.0));
-
-    vec2 ix = floor(px), iz = floor(pz);
-    bool sx = ix.x > i.x, sz = iz.y > i.y;
-
-    return vec3(GradientCorners(p, i, g00, g10, g01, g11),
-                GradientCorners(px, ix, sx ? g10 : g00, sx ? g20 : g10, sx ? g11 : g01,
-                                sx ? g21 : g11),
-                GradientCorners(pz, iz, sz ? g01 : g00, sz ? g11 : g10, sz ? g02 : g01,
-                                sz ? g12 : g11));
-}
-
-// Fractal sum of GradientNoise2x3 over the three points, octave for octave. The offset doubles
-// with each octave, so it must stay under one cell at the finest one.
-vec3 Fbm2x3(vec2 p, vec2 px, vec2 pz, int octaves) {
-    vec3  sum = vec3(0.0);
-    float amp = 0.5;
+// The gradient of a fractal sum of GradientNoise2D, with respect to p. Each octave's frequency
+// scales its slope, which is why the high octaves dominate a normal the way they never dominate
+// the height.
+vec2 Fbm2Slope(vec2 p, int octaves) {
+    vec2  sum  = vec2(0.0);
+    float amp  = 0.5;
+    float freq = 1.0;
     for (int i = 0; i < octaves; ++i) {
-        sum += GradientNoise2x3(p, px, pz) * amp;
-        p *= 2.03;
-        px *= 2.03;
-        pz *= 2.03;
+        sum += GradientNoise2D(p * freq).yz * (amp * freq);
+        freq *= 2.03;
         amp *= 0.5;
     }
     return sum;

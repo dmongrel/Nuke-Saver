@@ -57,23 +57,22 @@ void main() {
         // can do is alias.
         float detail = (1.0 - vRockiness) * exp(-distance / 1300.0);
         if (detail > 0.002) {
-            // The height here and one step along each axis, as (h, hx, hz). Evaluated together so
-            // the three share lattice corners; the step is 0.24 cells at the finest octave, inside
-            // the one cell Fbm2x3 allows.
-            vec2  p  = vWorldPos.xz;
-            float e  = 1.5;
-            vec2  px = p + vec2(e, 0.0);
-            vec2  pz = p + vec2(0.0, e);
-            vec3  hs = Fbm2x3(p * 0.012, px * 0.012, pz * 0.012, 3) * 0.75 +
-                       Fbm2x3(p * 0.08, px * 0.08, pz * 0.08, 2) * 0.05;
-            float h = hs.x, hx = hs.y, hz = hs.z;
+            // The slope of the height field h(p) = 0.75 Fbm(0.012 p) + 0.05 Fbm(0.08 p), taken
+            // analytically and scaled by the 1.5 m step the look was tuned against, when this was a
+            // forward difference over that step. The tangent and that secant agree on the coarse
+            // octaves; on the fine ones the secant spanned a quarter of a cell and read slightly
+            // flatter, so the ripples keep their pattern and gain a little contrast.
+            vec2  p     = vWorldPos.xz;
+            float e     = 1.5;
+            vec2  slope = e * (Fbm2Slope(p * 0.012, 3) * (0.75 * 0.012) +
+                               Fbm2Slope(p * 0.08, 2) * (0.05 * 0.08));
 
             // Gently. At 14 this read as corduroy rather than sand, and at 4.5 it still read as
             // fur wherever the ground ran away from the camera: at a grazing angle a metre of
             // ground covers a fraction of a pixel, so any texture with a slope in it turns into
             // streaks along the view direction. The fade above is the real control — past about a
             // kilometre there is nothing here worth drawing.
-            normal = normalize(normal + vec3(-(hx - h), 0.0, -(hz - h)) * detail * 2.6);
+            normal = normalize(normal + vec3(-slope.x, 0.0, -slope.y) * detail * 2.6);
         }
     }
 

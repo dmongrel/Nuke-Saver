@@ -31,14 +31,15 @@ vec3 FireIrradiance(vec3 worldPos, vec3 normal) {
     float radius = scene.fireLight.w;
     if (radius <= 0.0) return vec3(0.0);
 
+    // One reciprocal square root serves the direction and the falloff, where a length and two
+    // divides did the same job.
     vec3  toFire   = scene.fireLight.xyz - worldPos;
-    float distance = length(toFire);
-    vec3  lightDir = toFire / max(distance, 1e-3);
+    float invDist  = inversesqrt(max(dot(toFire, toFire), 1e-6));
+    vec3  lightDir = toFire * invDist;
 
-    // Inverse square outside the sphere, constant inside it. The 1 keeps the whole thing finite
-    // at the centre without changing anything at the distances that matter.
-    float d        = max(distance, radius);
-    float falloff  = (radius * radius) / (d * d);
+    // Inverse square outside the sphere, constant inside it: r²/max(d, r)², written as a clamp
+    // because inside the sphere r²/d² exceeds 1.
+    float falloff  = min(radius * radius * invDist * invDist, 1.0);
 
     // Half-Lambert rather than a hard terminator. The fireball fills a large solid angle from
     // anywhere in the city, so a surface angled away from it is still lit by the part of it that

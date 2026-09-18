@@ -70,6 +70,13 @@ vec3 CelestialBody(vec3 dir) {
     float isMoon     = scene.zenithColor.w;
 
     float cosAngle = dot(dir, keyDir);
+
+    // Far from the body both terms below are already exactly zero: the limb ends within a few
+    // hundredths of a radian of the key direction, and 0.6^220 = 2^-162 underflows to 0 in fp32.
+    // Returning early gives the same answer without the two cosines and the pow on every sky
+    // pixel. Holds while bodyRadius stays well under 0.8 rad (sky.cpp uses 0.022 to 0.034).
+    if (cosAngle <= 0.6) return vec3(0.0);
+
     // A soft limb, or the disc aliases into a ring of stair-steps at these radii.
     float limb = smoothstep(cos(bodyRadius * 1.06), cos(bodyRadius), cosAngle);
 

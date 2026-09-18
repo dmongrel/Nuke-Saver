@@ -1,7 +1,7 @@
 #version 450
 
-// Every fragment in the world, drawn into the key light's depth map (spec 8.2). The same instanced
-// call as fragment.vert — three vertices, no vertex buffer — with the light's matrix in place of
+// Every fragment in the world, drawn into the key light's depth map (spec 8.2). The same call as
+// fragment.vert — three vertices a fragment, no vertex buffer — with the light's matrix in place of
 // the camera's and nothing carried to a fragment stage, because there is not one.
 
 #include "scene.glsl"
@@ -11,7 +11,8 @@
 #include "fragment_common.glsl"
 
 void main() {
-    uint i = uint(gl_InstanceIndex);
+    uint i      = uint(gl_VertexIndex) / 3u;
+    uint corner = uint(gl_VertexIndex) - i * 3u;
 
     FragState s = state[i];
     FragRest  r = rest[i];
@@ -23,6 +24,6 @@ void main() {
         return;
     }
 
-    vec3 local = gl_VertexIndex == 0 ? r.c0.xyz : (gl_VertexIndex == 1 ? r.c1.xyz : r.c2.xyz);
+    vec3 local = corner == 0u ? r.c0.xyz : (corner == 1u ? r.c1.xyz : r.c2.xyz);
     gl_Position = scene.lightViewProj * vec4(s.pos.xyz + QuatRotate(s.quat, local), 1.0);
 }

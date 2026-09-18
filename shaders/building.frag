@@ -92,8 +92,12 @@ void main() {
     float lambert  = max(dot(normal, keyDir), 0.0);
     float keyAbove = smoothstep(-0.08, 0.06, keyDir.y);
 
-    vec3 shaded = albedo * scene.keyColor.rgb * lambert * keyAbove *
-                  KeyShadow(vWorldPos, normal);
+    // No shadow lookup where there is no direct light for it to block: the product is zero
+    // whatever the shadow says.
+    vec3 shaded = vec3(0.0);
+    if (lambert * keyAbove > 0.0) {
+        shaded = albedo * scene.keyColor.rgb * lambert * keyAbove * KeyShadow(vWorldPos, normal);
+    }
 
     // The sky this surface actually sits under, not a single authored constant. At twilight the
     // ambient colour of spec 5.4 is the violet overhead, which ignores the orange band filling

@@ -1,8 +1,12 @@
 #version 450
 
-// One instanced call for every fragment in the world (spec 7.3). Three vertices per instance and
-// no vertex buffer at all: the corner comes from gl_VertexIndex and everything else is read out of
-// the same two storage buffers the simulation writes.
+// One call for every fragment in the world (spec 7.3). Three consecutive vertices per fragment and
+// no vertex buffer at all: gl_VertexIndex names the fragment and the corner, and everything else is
+// read out of the same two storage buffers the simulation writes.
+//
+// Not instanced, although it reads like instancing. The hardware packs vertex waves poorly when
+// every instance is three vertices, so a plain draw of 3N vertices keeps the waves full; the
+// vertices and their order are the same either way.
 
 #include "scene.glsl"
 
@@ -15,7 +19,8 @@ layout(location = 1) out vec3 vNormal;
 layout(location = 2) out vec3 vColor;
 
 void main() {
-    uint i = uint(gl_InstanceIndex);
+    uint i      = uint(gl_VertexIndex) / 3u;
+    uint corner = uint(gl_VertexIndex) - i * 3u;
 
     FragState s = state[i];
     FragRest  r = rest[i];
@@ -31,7 +36,7 @@ void main() {
         return;
     }
 
-    vec3 local = gl_VertexIndex == 0 ? r.c0.xyz : (gl_VertexIndex == 1 ? r.c1.xyz : r.c2.xyz);
+    vec3 local = corner == 0u ? r.c0.xyz : (corner == 1u ? r.c1.xyz : r.c2.xyz);
 
     vec3 world = s.pos.xyz + QuatRotate(s.quat, local);
 

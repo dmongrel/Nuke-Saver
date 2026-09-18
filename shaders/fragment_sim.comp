@@ -28,16 +28,33 @@ void main() {
     if (i >= fp.counts.y) return;
 
     FragState s = state[i];
-    FragRest  r = rest[i];
 
     const float t      = fp.timing.x;
     const float dt     = fp.timing.y;
     const float rnd    = s.spin.w;
     const float gravity = fp.wind.w;
 
+    const float gatherStart = fp.timing.z;
+
+    // The window matters as much as the condition. Without the upper bound this runs every frame
+    // for the rest of the cycle, and a fragment let go by the disperse below is hauled straight
+    // back onto the cloud on the next one — which looks exactly like a cloud that never disperses.
+    bool gathering = t >= gatherStart && (fp.release.x <= 0.0 || t < fp.release.x);
+
+    // A settled fragment stays exactly where it is until the gather lifts it, so there is nothing
+    // to compute and nothing to write back.
+    if (s.pos.w == kFragSettled && !(gathering && fp.release.z > 0.0)) return;
+
+    FragRest r = rest[i];
+
     // --- fragmentation (spec 7.3) ---------------------------------------------------------------
     // The shell reaches this fragment's building and the building ceases to be one, in this frame.
+    // A fragment the shell has not reached is left alone: its record is still the one
+    // fragment_init.comp wrote, which is the intact state. The shell test comes first because it
+    // needs no memory, and the box lookup does.
     if (s.pos.w == kFragIntact) {
+        if (fp.blast.w <= 0.0) return;
+
         // Measured to the parent box's middle, exactly as building.vert measures it, so a
         // building is never both standing and in pieces in the same frame.
         ShatterBox parent = boxes[uint(r.anchor.w + 0.5)];
@@ -45,10 +62,7 @@ void main() {
                               parent.centerYaw.y + parent.extentQuads.z * 0.5,
                               parent.centerYaw.z);
         float distance = length(middle - fp.blast.xyz);
-        if (fp.blast.w <= 0.0 || distance > fp.blast.w) {
-            state[i].pos = vec4(r.anchor.xyz, kFragIntact);
-            return;
-        }
+        if (distance > fp.blast.w) return;
 
         // Radial impulse, falling off with distance, ragged by a fifth either way (spec 7.4).
         vec3 dir = normalize(r.anchor.xyz - fp.blast.xyz + vec3(0.0, 1.0, 0.0));
@@ -73,13 +87,6 @@ void main() {
     }
 
     // --- the pull reverses (spec 7.5) -----------------------------------------------------------
-    const float gatherStart = fp.timing.z;
-
-    // The window matters as much as the condition. Without the upper bound this runs every frame
-    // for the rest of the cycle, and a fragment let go by the disperse below is hauled straight
-    // back onto the cloud on the next one — which looks exactly like a cloud that never disperses.
-    bool gathering = t >= gatherStart && (fp.release.x <= 0.0 || t < fp.release.x);
-
     if (gathering && s.pos.w != kFragGather && fp.release.z > 0.0) {
         // Released from rest, wherever it lies. Grounded fragments lift off under the spring
         // rather than teleporting, which is the whole point of the phase reading as a gather.

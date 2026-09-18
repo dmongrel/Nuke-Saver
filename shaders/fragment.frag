@@ -31,8 +31,12 @@ void main() {
     float lambert  = max(dot(normal, keyDir), 0.0);
     float keyAbove = smoothstep(-0.08, 0.06, keyDir.y);
 
-    vec3 shaded = vColor * scene.keyColor.rgb * lambert * keyAbove *
-                  KeyShadow(vWorldPos, normal);
+    // No shadow lookup where there is no direct light for it to block: the product is zero
+    // whatever the shadow says.
+    vec3 shaded = vec3(0.0);
+    if (lambert * keyAbove > 0.0) {
+        shaded = vColor * scene.keyColor.rgb * lambert * keyAbove * KeyShadow(vWorldPos, normal);
+    }
 
     vec3 skyAmbient = max(scene.ambientColor.rgb,
                           mix(scene.horizonColor.rgb, scene.zenithColor.rgb, 0.7));

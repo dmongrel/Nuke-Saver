@@ -31,10 +31,14 @@ float KeyShadow(vec3 worldPos, vec3 normal) {
     vec2  uv    = ndc.xy * 0.5 + 0.5;
     float depth = ndc.z - scene.shadow.z;
 
+    // textureLod, not texture: callers skip this function where the key light is zero, which
+    // puts the lookup in non-uniform control flow where implicit derivatives are undefined. The
+    // map has one level and the same filter for magnification and minification, so level 0 is
+    // what texture() sampled anyway.
     float sum = 0.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
-            sum += texture(shadowMap, vec3(uv + vec2(x, y) * scene.shadow.x, depth));
+            sum += textureLod(shadowMap, vec3(uv + vec2(x, y) * scene.shadow.x, depth), 0.0);
         }
     }
     return sum * (1.0 / 9.0);

@@ -37,7 +37,13 @@ const int   kBins        = 256;
 #define EXPOSURE_ACCESS
 #endif
 
-layout(set = 0, binding = 1, std430) EXPOSURE_ACCESS buffer Exposure {
+// Binding 1 in the tonemap's set, which the histogram and adapt passes share. The first bloom
+// downsample bins the histogram too and binds it after its two images, at 2.
+#ifndef EXPOSURE_BINDING
+#define EXPOSURE_BINDING 1
+#endif
+
+layout(set = 0, binding = EXPOSURE_BINDING, std430) EXPOSURE_ACCESS buffer Exposure {
     float exposure;     // what the tonemap multiplies by; carried across frames
     float initialised;  // 0 until the first adapt has run, so frame 0 does not fade in from black
     float measured;     // the last measured average luminance, for logging

@@ -26,6 +26,7 @@
 #include "render/vk/window_target.h"
 #include "world/world.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -205,6 +206,9 @@ struct PipelineDesc {
     // spans many times its own thickness in one texel, and no constant bias covers both that and
     // a surface facing the light squarely (spec 8.2).
     bool             depthBias    = false;
+    // A triangle strip rather than a list, for the particle billboards: each instance is its own
+    // strip, and a six-vertex strip draws a hexagon where a six-vertex list draws only a quad.
+    bool             strip        = false;
 };
 
 VkPipeline CreateComputePipeline(VkDevice dev, const char* name, VkPipelineLayout layout) {
@@ -314,7 +318,8 @@ VkPipeline CreateGraphicsPipeline(VkDevice dev, const PipelineDesc& desc) {
 
     VkPipelineInputAssemblyStateCreateInfo assembly{};
     assembly.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    assembly.topology =
+        desc.strip ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
     VkPipelineViewportStateCreateInfo viewport{};
     viewport.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -547,10 +552,11 @@ public:
                   PipelineDesc::Vertices::None, false, 2, false, false, true});
         if (!shadowFragmentPipeline_) return false;
 
-        // The sky neither tests nor writes depth: it is behind everything by definition, and it
-        // is drawn first so terrain and city simply overwrite it.
+        // The sky tests depth but does not write it. It sits on the far plane and is drawn after
+        // everything opaque, so it shades only the pixels nothing covered. Drawn first, it shaded
+        // the whole frame and the terrain and city then overwrote more than half of it.
         skyPipeline_ = CreateGraphicsPipeline(
-            dev, {"sky.vert", "sky.frag", passes_.hdr, scenePipelineLayout_, false, false,
+            dev, {"sky.vert", "sky.frag", passes_.hdr, scenePipelineLayout_, true, false,
                   PipelineDesc::Vertices::None, false});
         if (!skyPipeline_) return false;
 
@@ -583,7 +589,7 @@ public:
                   PipelineDesc::Vertices::World, false});
         if (!missilePipeline_) return false;
 
-        // The fragments. No vertex buffer: three vertices an instance, everything else read out
+        // The fragments. No vertex buffer: three vertices a fragment, everything else read out
         // of the storage buffers. Double-sided, because spec 7.3 says a tumbling chip must show
         // both of its faces.
         fragmentPipeline_ = CreateGraphicsPipeline(
@@ -614,10 +620,10 @@ public:
         // translucent — and neither is culled, because a billboard has no back.
         particleAlphaPipeline_ = CreateGraphicsPipeline(
             dev, {"particle.vert", "particle.frag", passes_.hdr, particleDrawLayout_, true, false,
-                  PipelineDesc::Vertices::None, false, 2, false, true});
+                  PipelineDesc::Vertices::None, false, 2, false, true, false, true});
         particleAddPipeline_ = CreateGraphicsPipeline(
             dev, {"particle.vert", "particle.frag", passes_.hdr, particleDrawLayout_, true, false,
-                  PipelineDesc::Vertices::None, false, 2, true, false});
+                  PipelineDesc::Vertices::None, false, 2, true, false, false, true});
         if (!particleAlphaPipeline_ || !particleAddPipeline_) return false;
 
         particleCountPipeline_ =
@@ -733,6 +739,9 @@ public:
                 DestroyAttached(a);
                 return false;
             }
+            // Only the first step writes the histogram, but the shader declares the buffer at
+            // every level, so every downsample set must name it.
+            BindExposureBuffer(a.bloomDown[i], a.exposure, 2);
             if (i > 0 && !AllocateSet(bloomSetLayout_, &a.bloomUp[i])) {
                 app::Log("vulkan: attach failed on bloom level %u of %u (up)", i, levels);
                 DestroyAttached(a);
@@ -831,8 +840,8 @@ public:
             RecordParticleSort(frame, w);
 
             RecordScene(frame, w);
-            RecordBloom(frame, w);
-            RecordExposure(frame, w, dt);
+            const bool binned = RecordBloom(frame, w);
+            RecordExposure(frame, w, dt, binned);
             RecordTonemap(frame, w, dt);
 
             const bool capturing = capture_.enabled && frameCounter_ == capture_.atFrame;
@@ -908,7 +917,8 @@ private:
 
     bool CreateDescriptorPool() {
         // Sized for eight monitors: more than anyone attaches, and still trivially small.
-        // Eleven bloom steps a window at six levels, each reading one image and writing another.
+        // Eleven bloom steps a window at six levels, each reading one image and writing another;
+        // the downsample steps also carry the window's exposure buffer.
         const uint32_t bloomSets = 8 * (2 * kMaxBloomLevels);
 
         const VkDescriptorPoolSize sizes[] = {
@@ -919,8 +929,9 @@ private:
              8 * 2 + bloomSets + 8 * kFramesInFlight},
             // The fragment buffers, one set for the whole renderer, plus one auto-exposure buffer
             // and two particle buffers per window: the first are the world's, the rest are a
-            // window's, because both the exposure and the sort order belong to a view.
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 + 8 + 8 * 2},
+            // window's, because both the exposure and the sort order belong to a view. Plus the
+            // exposure buffer again in each of a window's downsample steps.
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 + 8 + 8 * 2 + 8 * kMaxBloomLevels},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, bloomSets},
         };
 
@@ -1126,7 +1137,7 @@ private:
         vkUpdateDescriptorSets(ctx_->device(), 1, &write, 0, nullptr);
     }
 
-    void BindExposureBuffer(VkDescriptorSet set, const Buffer& buffer) {
+    void BindExposureBuffer(VkDescriptorSet set, const Buffer& buffer, uint32_t binding = 1) {
         VkDescriptorBufferInfo info{};
         info.buffer = buffer.handle;
         info.range  = buffer.size;
@@ -1134,7 +1145,7 @@ private:
         VkWriteDescriptorSet write{};
         write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write.dstSet          = set;
-        write.dstBinding      = 1;
+        write.dstBinding      = binding;
         write.descriptorCount = 1;
         write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         write.pBufferInfo     = &info;
@@ -1339,7 +1350,9 @@ private:
     bool CreateBloomLayout() {
         VkDevice dev = ctx_->device();
 
-        VkDescriptorSetLayoutBinding bindings[2]{};
+        // The source, the destination, and the exposure buffer the first downsample bins the
+        // histogram into. The upsample shares the layout and declares only the first two.
+        VkDescriptorSetLayoutBinding bindings[3]{};
         bindings[0].binding         = 0;
         bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         bindings[0].descriptorCount = 1;
@@ -1350,9 +1363,14 @@ private:
         bindings[1].descriptorCount = 1;
         bindings[1].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
 
+        bindings[2].binding         = 2;
+        bindings[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[2].descriptorCount = 1;
+        bindings[2].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
         VkDescriptorSetLayoutCreateInfo dsl{};
         dsl.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        dsl.bindingCount = 2;
+        dsl.bindingCount = 3;
         dsl.pBindings    = bindings;
         if (vkCreateDescriptorSetLayout(dev, &dsl, nullptr, &bloomSetLayout_) != VK_SUCCESS) {
             return false;
@@ -1441,7 +1459,7 @@ private:
             const VkDescriptorSet sets[2] = {w.sceneSet[frame.frameSlot], fragmentSet_};
             vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fragmentDrawLayout_,
                                     0, 2, sets, 0, nullptr);
-            vkCmdDraw(frame.cmd, 3, fragmentLayout_.total, 0, 0);
+            vkCmdDraw(frame.cmd, 3 * fragmentLayout_.total, 1, 0, 0);
         }
 
         vkCmdEndRenderPass(frame.cmd);
@@ -1467,9 +1485,6 @@ private:
 
         vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scenePipelineLayout_, 0,
                                 1, &w.sceneSet[frame.frameSlot], 0, nullptr);
-
-        vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyPipeline_);
-        vkCmdDraw(frame.cmd, 3, 1, 0, 0);
 
         vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, groundPipeline_);
 
@@ -1550,9 +1565,17 @@ private:
             vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fragmentDrawLayout_,
                                     0, 2, sets, 0, nullptr);
 
-            // Three vertices, one instance a fragment, no vertex buffer bound at all (spec 7.3).
-            vkCmdDraw(frame.cmd, 3, fragmentLayout_.total, 0, 0);
+            // Three vertices a fragment, no vertex buffer bound at all (spec 7.3). One instance
+            // of 3N vertices rather than N instances of three: see fragment.vert.
+            vkCmdDraw(frame.cmd, 3 * fragmentLayout_.total, 1, 0, 0);
         }
+
+        // The sky, last of the opaque passes and before anything that blends. Its triangle is on
+        // the far plane, so the depth test passes only where nothing above was drawn.
+        vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyPipeline_);
+        vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scenePipelineLayout_, 0,
+                                1, &w.sceneSet[frame.frameSlot], 0, nullptr);
+        vkCmdDraw(frame.cmd, 3, 1, 0, 0);
 
         // The particles (spec 8.3). After everything that writes depth, so they are occluded
         // correctly, and before the emissive passes, so the fireball's glow goes over the dust it
@@ -1626,9 +1649,11 @@ private:
     // The bloom chain (spec 8.1). Runs between the two render passes, on the finished HDR image:
     // down to the smallest level with a thresholded first step, then back up with a tent filter,
     // summing as it goes, so level 0 ends up holding the whole chain.
-    void RecordBloom(const WindowTarget::Frame& frame, Attached& w) {
+    // Returns whether the chain ran, because its first step also bins the exposure histogram and
+    // RecordExposure has to do that itself when it did not.
+    bool RecordBloom(const WindowTarget::Frame& frame, Attached& w) {
         const uint32_t levels = BloomLevelsFor(w);
-        if (!levels) return;
+        if (!levels) return false;
 
         // The whole chain is rewritten every frame, so the previous contents are worth nothing and
         // UNDEFINED is the honest old layout: it lets the driver skip a decompress it would
@@ -1646,12 +1671,16 @@ private:
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                              &toGeneral);
 
-        const auto dispatch = [&](VkDescriptorSet set, const BloomPush& push, VkExtent2D extent) {
+        // `group` is the shader's workgroup edge: 16 for the downsample, which bins the histogram
+        // with one bin per invocation, and 8 for the upsample.
+        const auto dispatch = [&](VkDescriptorSet set, const BloomPush& push, VkExtent2D extent,
+                                  uint32_t group) {
             vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bloomPipelineLayout_,
                                     0, 1, &set, 0, nullptr);
             vkCmdPushConstants(frame.cmd, bloomPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                sizeof(push), &push);
-            vkCmdDispatch(frame.cmd, (extent.width + 7) / 8, (extent.height + 7) / 8, 1);
+            vkCmdDispatch(frame.cmd, (extent.width + group - 1) / group,
+                          (extent.height + group - 1) / group, 1);
             Barrier(frame.cmd);
         };
 
@@ -1665,7 +1694,16 @@ private:
             push.threshold         = kBloomThreshold;
             push.knee              = kBloomKnee;
             push.firstLevel        = i == 0 ? 1.0f : 0.0f;
-            dispatch(w.bloomDown[i], push, extent);
+
+            // The first step also bins the histogram from every second HDR texel, which on an
+            // odd-sized image reaches one column or row past the halved extent (rounded down).
+            VkExtent2D grid = extent;
+            if (i == 0) {
+                const VkExtent2D hdr = w.target->extent();
+                grid.width  = std::max(grid.width, (hdr.width + 1) / 2);
+                grid.height = std::max(grid.height, (hdr.height + 1) / 2);
+            }
+            dispatch(w.bloomDown[i], push, grid, 16);
         }
 
         vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bloomUpPipeline_);
@@ -1676,7 +1714,7 @@ private:
             push.destinationWidth  = static_cast<float>(extent.width);
             push.destinationHeight = static_cast<float>(extent.height);
             push.intensity         = kBloomIntensity;
-            dispatch(w.bloomUp[i], push, extent);
+            dispatch(w.bloomUp[i], push, extent, 8);
         }
 
         // The tonemap samples level 0 from the fragment stage.
@@ -1687,11 +1725,13 @@ private:
         vkCmdPipelineBarrier(frame.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
                              nullptr);
+        return true;
     }
 
     // Auto-exposure (spec 8.2). Runs between the two render passes: the HDR image is complete and
     // in SHADER_READ_ONLY_OPTIMAL by then, and the tonemap that reads the result has not started.
-    void RecordExposure(const WindowTarget::Frame& frame, Attached& w, float dt) {
+    // `binned` says the bloom chain already filled the histogram this frame.
+    void RecordExposure(const WindowTarget::Frame& frame, Attached& w, float dt, bool binned) {
         const VkExtent2D  extent = w.target->extent();
         const TonemapPush push   = BuildTonemapPush(w, dt);
 
@@ -1701,14 +1741,17 @@ private:
                            VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 0,
                            sizeof(push), &push);
 
-        // One invocation per second texel each way, so the group count is over half the extent.
-        const uint32_t groupsX = (extent.width / 2 + 15) / 16;
-        const uint32_t groupsY = (extent.height / 2 + 15) / 16;
+        if (!binned) {
+            // One invocation per second texel each way, so the group count is over half the
+            // extent.
+            const uint32_t groupsX = (extent.width / 2 + 15) / 16;
+            const uint32_t groupsY = (extent.height / 2 + 15) / 16;
 
-        vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, histogramPipeline_);
-        vkCmdDispatch(frame.cmd, groupsX, groupsY, 1);
+            vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, histogramPipeline_);
+            vkCmdDispatch(frame.cmd, groupsX, groupsY, 1);
 
-        Barrier(frame.cmd);
+            Barrier(frame.cmd);
+        }
 
         vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, adaptPipeline_);
         vkCmdDispatch(frame.cmd, 1, 1, 1);
@@ -2192,6 +2235,10 @@ private:
             Barrier(cmd);
             fragmentsInitialised_ = true;
         }
+
+        // Before the shell exists every fragment is intact, and an intact fragment's record is
+        // the one the init pass just wrote. The simulation would read all of them and change none.
+        if (world_.ShellRadius(t) <= 0.0f) return;
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fragmentSimPipeline_);
         vkCmdDispatch(cmd, groups, 1, 1);

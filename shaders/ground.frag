@@ -57,13 +57,16 @@ void main() {
         // can do is alias.
         float detail = (1.0 - vRockiness) * exp(-distance / 1300.0);
         if (detail > 0.002) {
-            vec2  p = vWorldPos.xz;
-            float e = 1.5;
-            float h  = Fbm2(p * 0.012, 3) * 0.75 + Fbm2(p * 0.08, 2) * 0.05;
-            float hx = Fbm2((p + vec2(e, 0.0)) * 0.012, 3) * 0.75 +
-                       Fbm2((p + vec2(e, 0.0)) * 0.08, 2) * 0.05;
-            float hz = Fbm2((p + vec2(0.0, e)) * 0.012, 3) * 0.75 +
-                       Fbm2((p + vec2(0.0, e)) * 0.08, 2) * 0.05;
+            // The height here and one step along each axis, as (h, hx, hz). Evaluated together so
+            // the three share lattice corners; the step is 0.24 cells at the finest octave, inside
+            // the one cell Fbm2x3 allows.
+            vec2  p  = vWorldPos.xz;
+            float e  = 1.5;
+            vec2  px = p + vec2(e, 0.0);
+            vec2  pz = p + vec2(0.0, e);
+            vec3  hs = Fbm2x3(p * 0.012, px * 0.012, pz * 0.012, 3) * 0.75 +
+                       Fbm2x3(p * 0.08, px * 0.08, pz * 0.08, 2) * 0.05;
+            float h = hs.x, hx = hs.y, hz = hs.z;
 
             // Gently. At 14 this read as corduroy rather than sand, and at 4.5 it still read as
             // fur wherever the ground ran away from the camera: at a grazing angle a metre of
@@ -81,7 +84,12 @@ void main() {
     // direct light gradually instead of switching off at exactly zero elevation.
     float keyAbove = smoothstep(-0.08, 0.06, keyDir.y);
 
-    vec3 lit = albedo * scene.keyColor.rgb * lambert * keyAbove * KeyShadow(vWorldPos, normal);
+    // The shadow lookup is skipped where there is no direct light for it to block: a zero Lambert
+    // term makes the product zero whatever the shadow says.
+    vec3 lit = vec3(0.0);
+    if (lambert * keyAbove > 0.0) {
+        lit = albedo * scene.keyColor.rgb * lambert * keyAbove * KeyShadow(vWorldPos, normal);
+    }
 
     // The sky this surface actually sits under, not a single authored constant. At twilight the
     // ambient colour of spec 5.4 is the violet overhead, which ignores the orange band filling
@@ -103,13 +111,16 @@ void main() {
     // The board as a light source (spec 7.6). A point light at the glyph band, amber, falling off
     // over its own radius — the rooftops beneath it must be visibly lit by it at night, and it
     // must not be absent at noon.
-    vec3  toBoard   = scene.boardLight.xyz - vWorldPos;
-    float boardDist = length(toBoard);
-    float falloff   = scene.boardLight.w /
-                      (1.0 + (boardDist * boardDist) /
-                                 max(scene.boardColor.w * scene.boardColor.w, 1.0));
-    lit += albedo * scene.boardColor.rgb *
-              max(dot(normal, toBoard / max(boardDist, 1e-3)), 0.0) * falloff;
+    // Zero until the board lights, which is most of the cycle, and the term is then exactly zero.
+    if (scene.boardLight.w > 0.0) {
+        vec3  toBoard   = scene.boardLight.xyz - vWorldPos;
+        float boardDist = length(toBoard);
+        float falloff   = scene.boardLight.w /
+                          (1.0 + (boardDist * boardDist) /
+                                     max(scene.boardColor.w * scene.boardColor.w, 1.0));
+        lit += albedo * scene.boardColor.rgb *
+                  max(dot(normal, toBoard / max(boardDist, 1e-3)), 0.0) * falloff;
+    }
 
     // The fireball (spec 8.2). From phase 5 this is the dominant term, by a long way: the
     // scorched floor around the impact point is lit by nothing else.

@@ -23,7 +23,7 @@ void main() {
     // Below the horizon the earth is in the way. Fading to the ground colour, and taking the body
     // with it, keeps a twilight sun that has dipped below the horizon from glaring through the
     // ground it is supposed to be behind. Terrain covers most of this, but not the gap beyond the
-    // skirt, and not before the terrain draws.
+    // skirt.
     //
     // The edge is centred exactly on dir.y = 0 and is one pixel wide, which matters more than it
     // looks. dir is normalised, so a threshold at any *other* value of dir.y describes a cone

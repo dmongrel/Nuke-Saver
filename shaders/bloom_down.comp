@@ -7,11 +7,21 @@
 // crawls as the camera moves — the classic firefly — and the first mip is where that is decided.
 // So the first level takes a Karis average, weighting each group of four by its own inverse
 // luminance, which is the one place it is worth the extra arithmetic.
+//
+// The first level also bins the auto-exposure histogram (spec 8.2), which is what
+// exposure_histogram.comp does on its own when there is no bloom chain. It reads every second HDR
+// texel each way, and each of those lies under this pass's centre tap, so folded in here it costs
+// a fetch from cache instead of a second read of the whole HDR image from memory.
 
-layout(local_size_x = 8, local_size_y = 8) in;
+// 16 x 16, so that on the first level each invocation owns one of the 256 histogram bins for the
+// clear and the merge, exactly as in exposure_histogram.comp.
+layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(set = 0, binding = 0) uniform sampler2D uSource;
 layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D uDestination;
+
+#define EXPOSURE_BINDING 2
+#include "exposure.glsl"
 
 layout(push_constant) uniform Push {
     vec2  destinationSize;
@@ -32,8 +42,7 @@ vec3 Group(vec3 a, vec3 b, vec3 c, vec3 d, bool weighted) {
     return (a * wa + b * wb + c * wc + d * wd) / max(wa + wb + wc + wd, 1e-4);
 }
 
-void main() {
-    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+void Downsample(ivec2 texel) {
     if (texel.x >= int(pc.destinationSize.x) || texel.y >= int(pc.destinationSize.y)) return;
 
     // Sample in the source's own space, at the centre of the four texels this one covers.
@@ -77,4 +86,35 @@ void main() {
     }
 
     imageStore(uDestination, texel, vec4(result, 1.0));
+}
+
+shared uint sBins[kBins];
+
+void main() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+
+    // firstLevel is a push constant, so these branches are uniform across the workgroup and the
+    // barriers inside them are legal.
+    bool histogram = pc.firstLevel > 0.5;
+    uint local     = gl_LocalInvocationIndex;
+    if (histogram) {
+        sBins[local] = 0u;
+        barrier();
+    }
+
+    Downsample(texel);
+
+    if (histogram) {
+        // The same texels exposure_histogram.comp takes: (2x, 2y) for every such point inside the
+        // HDR image. The host dispatches enough of this level to reach all of them, which on an
+        // odd-sized image is one column or row past the downsample's own extent.
+        ivec2 coord = texel * 2;
+        if (all(lessThan(coord, textureSize(uSource, 0)))) {
+            vec3 hdr = texelFetch(uSource, coord, 0).rgb;
+            atomicAdd(sBins[LogLumToBin(Luminance(hdr))], 1u);
+        }
+
+        barrier();
+        if (sBins[local] != 0u) atomicAdd(ex.bins[local], sBins[local]);
+    }
 }
